@@ -1,4 +1,4 @@
-/* Cassora → Gen 3 species remap table.
+/* Gen 3 ROM-hack species remap table.
  *
  * Hand-curated mapping from pokeemerald-expansion species IDs (≥ 387) to the
  * nearest legal Gen 3 species (1–386). Used by the legalizer to produce
@@ -14,23 +14,23 @@
  *   4. Starters map to Gen 3 starters of matching type.
  *   5. Forms (Hisuian/Alolan/Galarian) inherit their base species' Gen 3 form.
  *
- * Coverage: every species listed in Cassora's POKEDEX.md (229 entries) plus
+ * Coverage: every species listed in the standard pokeemerald-expansion species ID range plus
  * the broad pokeemerald-expansion ID range we expect ROM hacks to use.
  * Species outside the curated set fall back to Unown (#201) in
  * pb_species_remap() as a clear "needs review" marker.
  */
-#ifndef POKEBRIDGE_CASSORA_SPECIES_MAP_H
-#define POKEBRIDGE_CASSORA_SPECIES_MAP_H
+#ifndef POKEBRIDGE_ROM_HACK_SPECIES_MAP_H
+#define POKEBRIDGE_ROM_HACK_SPECIES_MAP_H
 
 #include <stdint.h>
 
 /* Sentinel for "no entry in this slot". */
-#define CASSORA_REMAP_NONE  0
+#define PB_REMAP_NONE  0
 
-/* Indexed by pokeemerald-expansion species ID. Entry of CASSORA_REMAP_NONE
+/* Indexed by pokeemerald-expansion species ID. Entry of PB_REMAP_NONE
  * means we don't have a curated mapping (legalizer falls back to Unown). */
-static const uint16_t cassora_species_remap[1025] = {
-    /* === Gen 4 (387–493) used in Cassora === */
+static const uint16_t pb_rom_hack_species_remap[1025] = {
+    /* === Gen 4 (387–493) in the standard species enum === */
     [399] = 263, /* Bidoof       -> Zigzagoon  (normal small herbivore)   */
     [400] = 264, /* Bibarel      -> Linoone    (normal evolved)           */
     [425] = 200, /* Drifloon     -> Misdreavus (ghost)                    */
@@ -60,7 +60,7 @@ static const uint16_t cassora_species_remap[1025] = {
     [485] = 383, /* Heatran      -> Groudon    (fire-ground legendary)    */
     [490] = 385, /* Manaphy      -> Jirachi    (mythical)                 */
 
-    /* === Gen 5 (494–649) used in Cassora === */
+    /* === Gen 5 (494–649) in the standard species enum === */
     [524] = 304, /* Roggenrola   -> Aron       (rock baby)                */
     [525] = 305, /* Boldore      -> Lairon                                */
     [526] = 306, /* Gigalith     -> Aggron                                */
@@ -102,7 +102,7 @@ static const uint16_t cassora_species_remap[1025] = {
     [636] = 324, /* Larvesta     -> Torkoal    (fire)                     */
     [637] = 324, /* Volcarona    -> Torkoal                               */
 
-    /* === Gen 6 (650–721) used in Cassora === */
+    /* === Gen 6 (650–721) in the standard species enum === */
     [698] = 369, /* Amaura       -> Relicanth  (fossil)                   */
     [699] = 369, /* Aurorus      -> Relicanth                             */
     [700] = 282, /* Sylveon      -> Gardevoir  (fairy-ish, psychic)       */
@@ -113,7 +113,7 @@ static const uint16_t cassora_species_remap[1025] = {
     [712] = 361, /* Bergmite     -> Snorunt                               */
     [713] = 362, /* Avalugg      -> Glalie                                */
 
-    /* === Gen 7 (722–809) used in Cassora === */
+    /* === Gen 7 (722–809) in the standard species enum === */
     [744] = 261, /* Rockruff     -> Poochyena                             */
     [745] = 262, /* Lycanroc-Dusk-> Mightyena                             */
     [755] = 285, /* Morelull     -> Shroomish                             */
@@ -122,7 +122,7 @@ static const uint16_t cassora_species_remap[1025] = {
     [783] = 372, /* Hakamo-o     -> Shelgon                               */
     [784] = 373, /* Kommo-o      -> Salamence                             */
 
-    /* === Gen 8 (810–905) used in Cassora === */
+    /* === Gen 8 (810–905) in the standard species enum === */
     [872] = 265, /* Snom         -> Wurmple                               */
     [873] = 267, /* Frosmoth     -> Beautifly                             */
     [875] = 363, /* Eiscue       -> Spheal                                */

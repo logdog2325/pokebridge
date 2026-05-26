@@ -1,4 +1,4 @@
-# How a Cassora Pokémon gets to Pokémon HOME
+# How a ROM-hack Pokémon gets to Pokémon HOME
 
 **Short answer:** PokéBridge can produce HOME-eligible Gen 3 `.pk3` files, but
 the GameCube cannot complete the chain on its own. Bank/HOME require Nintendo's
@@ -39,7 +39,7 @@ Pokémon HOME
 2. **Decodes** every party + boxed pokemon — including the PID-scrambled
    substructure data, IVs, EVs, moves, OT, friendship, ribbons.
 3. **Remaps hack data** to legal Gen 3 equivalents:
-   - Species ID > 386 → mapped (e.g. Cassora's Deino → some Gen 3 dragon).
+   - Species ID > 386 → mapped (e.g. a hack-only Deino → some Gen 3 dragon).
    - Move ID > 354 → mapped or dropped.
    - Held item > 376 → cleared.
 4. **Re-encrypts** the record and writes an 80-byte `.pk3` to
@@ -71,16 +71,20 @@ PKHeX touches:
 - Inject into any Gen 3+ save
 - Run the legality analyzer
 
-## Cassora-specific mapping (TODO)
 
-Cassora's `POKEDEX.md` (currently 229 species, IDs 1..229 reused + new IDs
-in the 387..N range) needs an explicit `custom_id → official_id` table. The
-plan is to generate `include/cassora_species_map.h` from POKEDEX.md so that:
+## ROM-hack species mapping
 
-- Custom regional variants → their base species (e.g. Cassora-Cedaroar → Houndoom)
-- Cassora-exclusive starters → flavor-matching Gen 3 starters
-- Cassora's pseudo-legendaries → Gen 3 pseudo-legendaries by type match
+ROM hacks based on `pokeemerald-expansion` typically use Gen 1–9 species IDs
+beyond Gen 3's 1..386 range. `include/rom_hack_species_map.h` provides a
+curated 387..1024 → 1..386 lookup. Strategy per entry:
 
-Same approach for moves — pokeemerald-expansion's move IDs above 354 map to
-Gen 4+ moves with known Gen 3 analogues (Bullet Punch ↔ ThunderPunch,
-Aqua Jet ↔ Quick Attack, etc.) or get dropped.
+- **Pseudo-legendaries** map to Gen 3 pseudos (Bagon → Salamence line)
+- **Starters** map to Gen 3 starters of matching type
+- **Cross-gen evolutions** map back to their Gen 3 prevolution
+- **Regional form variants** map to their base species
+- Anything not in the curated set falls back to Unown (#201) as a clear
+  "needs manual review" marker
+
+Same approach for moves — pokeemerald-expansion's Gen 4+ moves with known
+Gen 3 analogues (Bullet Punch ↔ ThunderPunch, Aqua Jet ↔ Quick Attack, etc.)
+get mapped; the rest are dropped to move 0 with PP cleared.

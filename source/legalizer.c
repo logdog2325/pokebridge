@@ -1,12 +1,12 @@
 #include "legalizer.h"
-#include "cassora_species_map.h"
+#include "rom_hack_species_map.h"
 #include <string.h>
 
 /* Map a pokeemerald-expansion species ID to a legal Gen 3 species (1..386).
  *
  *   0           -> 0 (empty slot, no remap needed)
  *   1..386      -> passthrough (already legal)
- *   387..1024   -> cassora_species_remap[] table lookup
+ *   387..1024   -> pb_rom_hack_species_remap[] table lookup
  *   1025+       -> form variant (Hisuian/Alolan/Galarian extended IDs); we
  *                  don't have ID-level knowledge of the form scheme, so we
  *                  fall back to Unown (#201) as a clear "needs review" marker.
@@ -15,9 +15,9 @@
 uint16_t pb_species_remap(uint16_t custom_id) {
     if (custom_id == 0) return 0;
     if (custom_id <= 386) return custom_id;
-    if (custom_id < (sizeof cassora_species_remap / sizeof cassora_species_remap[0])) {
-        uint16_t mapped = cassora_species_remap[custom_id];
-        if (mapped != CASSORA_REMAP_NONE) return mapped;
+    if (custom_id < (sizeof pb_rom_hack_species_remap / sizeof pb_rom_hack_species_remap[0])) {
+        uint16_t mapped = pb_rom_hack_species_remap[custom_id];
+        if (mapped != PB_REMAP_NONE) return mapped;
     }
     return 201; /* Unown -- the "I don't have a mapping for this" marker */
 }

@@ -4,14 +4,14 @@
  *
  * Strategy:
  *   1. If species > 386 → remap via the project's species_map table
- *      (Cassora's POKEDEX.md gives us a 387..N → 1..386 mapping).
+ *      (a hand-curated 387..N → 1..386 lookup based on type and role).
  *   2. If any move > 354 (last Gen 3 move) → remap via move_map; if no good
  *      analogue, drop the slot to move 0 (no move) and fix PP.
  *   3. If held item > 376 → set to 0.
  *   4. If ability bit selects an ability the legal species doesn't have →
  *      flip to ability 0.
- *   5. Re-roll PID consistent with desired nature/gender (Cassora's gender
- *      ratios are inherited from official species after remap, so usually fine).
+ *   5. Re-roll PID consistent with desired nature/gender (gender ratios are
+ *      inherited from the official species after remap, so usually fine).
  *   6. Recompute checksum, re-encrypt.
  *
  * The original is not modified — output goes into a fresh buffer that callers

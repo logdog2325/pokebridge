@@ -28,7 +28,7 @@ typedef enum {
     PB_GAME_RS,        /* Ruby / Sapphire */
     PB_GAME_FRLG,      /* FireRed / LeafGreen */
     PB_GAME_EMERALD,
-    PB_GAME_HACK       /* Cassora or other pokeemerald-expansion based hack */
+    PB_GAME_HACK       /* pokeemerald or pokeemerald-expansion based ROM hack */
 } pb_game_t;
 
 typedef struct {

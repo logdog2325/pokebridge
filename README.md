@@ -1,6 +1,6 @@
 # PokéBridge
 
-A **GameCube homebrew app** for reading, editing, and exporting Pokémon Gen 3 saves — covering Ruby, Sapphire, Emerald, FireRed, LeafGreen, **all pokeemerald-expansion ROM hacks** (Cassora, Seaglass, Lazarus, etc.), and the two Gen 3 GameCube titles **Pokémon XD: Gale of Darkness** and **Pokémon Colosseum**.
+A **GameCube homebrew app** for reading, editing, and exporting Pokémon Gen 3 saves — covering Ruby, Sapphire, Emerald, FireRed, LeafGreen, **all pokeemerald-expansion ROM hacks** (Seaglass, Lazarus, etc.), and the two Gen 3 GameCube titles **Pokémon XD: Gale of Darkness** and **Pokémon Colosseum**.
 
 The interface is fully graphical with a Pokémon Box: Ruby & Sapphire aesthetic — pastel-blue gradient backgrounds, rounded translucent panels, real Gen 3-style sprites for **all 1025 species + shiny variants**, and box-art previews for every mainstream Gen 3-era game.
 
@@ -13,7 +13,7 @@ The interface is fully graphical with a Pokémon Box: Ruby & Sapphire aesthetic 
   - Shiny toggle preserves nature via PID re-rolling; nature edit preserves shiny status
   - Sprites swap to the shiny variant live in the preview
 - **Write** edited saves back to SD with correct checksums + encryption for the source format
-- **Legalize** ROM-hack Pokémon into Gen 3-compatible `.pk3` files for the Pokémon HOME transfer chain (Cassora-aware species/move remap)
+- **Legalize** ROM-hack Pokémon into Gen 3-compatible `.pk3` files for the Pokémon HOME transfer chain (species/move remap for the standard pokeemerald-expansion enum)
 - **Read GBA cart saves over the link cable** by multiboot-loading FIX94's dumper onto a connected GBA (untested — needs hardware verification)
 
 ## Screenshots
@@ -119,7 +119,7 @@ All four formats expose a common edit surface via `pb_pkm_t`. Edits write back t
 
 ### Legalizer
 
-ROM-hack Pokémon (species ID > 386) are mapped to nearest Gen 3 analogues via a hand-curated table (`include/cassora_species_map.h`) — pseudos map to Bagon line, regional starters to Gen 3 starters of matching type, etc. Output is a PKHeX-compatible 80-byte `.pk3` file that rides the legitimate Gen 3 → Pal Park → Gen 4 → Bank → HOME chain (see [docs/HOME_TRANSFER.md](docs/HOME_TRANSFER.md)).
+ROM-hack Pokémon (species ID > 386) are mapped to nearest Gen 3 analogues via a hand-curated table (`include/rom_hack_species_map.h`) — pseudos map to Bagon line, regional starters to Gen 3 starters of matching type, etc. Output is a PKHeX-compatible 80-byte `.pk3` file that rides the legitimate Gen 3 → Pal Park → Gen 4 → Bank → HOME chain (see [docs/HOME_TRANSFER.md](docs/HOME_TRANSFER.md)).
 
 ### Graphics
 
@@ -137,7 +137,7 @@ Mirror of FIX94's `gba-link-cable-dumper`. Detects a GBA on a controller port, r
 | Format | Read | Edit | Write |
 |--------|------|------|-------|
 | Gen 3 GBA (Ruby/Sapphire/Emerald/FireRed/LeafGreen) | ✅ | ✅ | ✅ |
-| pokeemerald-expansion ROM hacks (Cassora, Seaglass, Lazarus...) | ✅ | ✅ | ✅ |
+| pokeemerald-expansion ROM hacks (Seaglass, Lazarus, etc.) | ✅ | ✅ | ✅ |
 | Pokémon XD: Gale of Darkness | ✅ | ✅ | ✅ |
 | Pokémon Colosseum | ✅ | ✅ | ✅ |
 | GBA cart over link cable | 🟡 ported, untested | n/a | n/a |

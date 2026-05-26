@@ -2083,7 +2083,7 @@ void pb_ui_run_graphics_app(void) {
                         pb_gfx_text(48, 184, PB_GFX_COLOR_TEXT, "* Emerald (GBA)");
                         pb_gfx_text(48, 200, PB_GFX_COLOR_TEXT, "* FireRed / LeafGreen (GBA)");
                         pb_gfx_text(48, 216, PB_GFX_COLOR_TEXT, "* pokeemerald-expansion ROM hacks");
-                        pb_gfx_text(64, 230, PB_GFX_COLOR_TEXT_DIM, "(Cassora, Seaglass, Lazarus...)");
+                        pb_gfx_text(64, 230, PB_GFX_COLOR_TEXT_DIM, "(Seaglass, Lazarus, etc.)");
                         pb_gfx_text(48, 250, PB_GFX_COLOR_TEXT, "* Pokemon XD: Gale of Darkness");
                         pb_gfx_text(64, 264, PB_GFX_COLOR_TEXT_DIM, "(decrypts both save slots)");
                         pb_gfx_text(48, 290, PB_GFX_COLOR_TEXT_DIM, "Coming soon:");
@@ -2108,7 +2108,7 @@ void pb_ui_run_graphics_app(void) {
                         pb_gfx_text(360, 322, PB_GFX_COLOR_TEXT_DIM, "* XD (encrypt + checksums)");
                         pb_gfx_text(342, 348, PB_GFX_COLOR_TEXT_ACCENT, "Legalizer:");
                         pb_gfx_text(360, 364, PB_GFX_COLOR_TEXT_DIM, "* Hack-mon -> Gen 3 legal .pk3");
-                        pb_gfx_text(360, 380, PB_GFX_COLOR_TEXT_DIM, "* Cassora-aware species map");
+                        pb_gfx_text(360, 380, PB_GFX_COLOR_TEXT_DIM, "* ROM-hack species remap");
                         pb_gfx_text(360, 396, PB_GFX_COLOR_TEXT_DIM, "* HOME chain documented");
 
                         gfx_draw_hint_bar("B: back");
