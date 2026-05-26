@@ -18,7 +18,25 @@ The interface is fully graphical with a Pokémon Box: Ruby & Sapphire aesthetic 
 
 ## Screenshots
 
-*(add screenshots here — Dolphin captures of main menu, XD party screen, edit screen, etc.)*
+### Main menu — game-themed box art previews
+
+![Main menu with FireRed box art preview](docs/screenshots/main_menu.png)
+
+### XD party browser — MARK's iconic team, with detail panel
+
+![Pokemon XD party screen — MARK's team](docs/screenshots/xd_party.png)
+
+### Editor — live shiny sprite swap
+
+![Editor: Charizard with shiny toggled — sprite swaps to the black/silver variant in real time](docs/screenshots/edit_shiny.png)
+
+### Move picker — full 354 Gen 3 moves, paged
+
+![Move picker, paged through all 354 Gen 3 moves](docs/screenshots/moves_picker.png)
+
+### Game Art Gallery — every mainstream Gen 3-era title
+
+![Game Art Gallery with Pokemon Emerald / Rayquaza featured](docs/screenshots/game_art_gallery.png)
 
 ## Quick start
 
