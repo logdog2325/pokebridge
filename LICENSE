@@ -1,0 +1,35 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+                            Preamble
+
+  The GNU General Public License is a free, copyleft license for
+software and other kinds of works.
+
+  PokéBridge is licensed under GPL-3.0 because it incorporates
+algorithms ported from PKHeX (https://github.com/kwsch/PKHeX),
+which is itself GPL-3.0. See CREDITS.md for the full attribution.
+
+  For the complete license text, see:
+  https://www.gnu.org/licenses/gpl-3.0.en.html
+
+  TL;DR (this is NOT legal advice; the linked text is authoritative):
+
+   - You may copy, modify, and distribute this software.
+   - If you distribute modified versions, you must license them under
+     GPL-3.0 too and make the source code available.
+   - There is no warranty; use at your own risk.
+
+  PokéBridge specifically:
+
+   - Does NOT include any Nintendo ROMs, save files, or proprietary
+     graphics. Sprites are derived from the GPL-3.0-licensed
+     pokeemerald-expansion project.
+   - The GBA-side multiboot dumper is built from FIX94's
+     gba-link-cable-dumper (MIT), which is compatible with GPL-3.0.
+   - "Pokémon" and all related names are trademarks of Nintendo /
+     Game Freak / The Pokémon Company. Nominative use only.
