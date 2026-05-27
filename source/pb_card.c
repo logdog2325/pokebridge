@@ -17,15 +17,18 @@ static void ensure_inited(void) {
     s_card_inited = true;
 }
 
-/* Game code dispatch. Real Pokémon game codes (regional variants):
+/* Game code dispatch. Real Pokémon GameCube product codes (regional
+ * variants), verified against PKHeX SaveHandlerGCI.cs and GameTDB:
  *   XD:        GXXE (US), GXXP (PAL), GXXJ (JP)
- *   Colosseum: GC6E (US), GC6P (PAL), GC6J (JP), GC6S (KO?)
- *   Pokemon Box: G3RE / G3RP / G3RJ
+ *   Colosseum: GC6E (US), GC6P (PAL), GC6J (JP)
+ *   Pokemon Box: GPXE (US), GPXP (PAL), GPXJ (JP)
+ * NOTE: "G3R" was an early incorrect guess for Pokemon Box -- the real
+ * code is GPX. Don't put it back.
  */
 static pb_card_game_t classify(const char gamecode[4]) {
     if (gamecode[0] == 'G' && gamecode[1] == 'X' && gamecode[2] == 'X') return PB_CARD_GAME_XD;
     if (gamecode[0] == 'G' && gamecode[1] == 'C' && gamecode[2] == '6') return PB_CARD_GAME_COLOSSEUM;
-    if (gamecode[0] == 'G' && gamecode[1] == '3' && gamecode[2] == 'R') return PB_CARD_GAME_BOX;
+    if (gamecode[0] == 'G' && gamecode[1] == 'P' && gamecode[2] == 'X') return PB_CARD_GAME_BOX;
     return PB_CARD_GAME_UNKNOWN;
 }
 
@@ -38,9 +41,19 @@ const char *pb_card_game_name(pb_card_game_t g) {
     }
 }
 
+/* Build-time sanity: our opaque blob must be at least sizeof(card_dir). */
+typedef char pb_card_blob_size_check[(sizeof(card_dir) <= PB_CARD_DIR_BLOB_SIZE) ? 1 : -1];
+
 static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count) {
     int err = CARD_Mount(slot, s_workarea, NULL);
     if (err < 0) return 0;  /* no card / unformatted / etc. */
+
+    /* GCMM pattern: SetGamecode(NULL)/SetCompany(NULL) disables the
+     * directory filter so FindFirst sees ALL entries regardless of
+     * which gamecode CARD_Init was called with. (showall=true on
+     * FindFirst handles this too, but doing both is defensive.) */
+    CARD_SetGamecode(NULL);
+    CARD_SetCompany(NULL);
 
     card_dir dir;
     int ret = CARD_FindFirst(slot, &dir, true);
@@ -53,10 +66,11 @@ static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count
             memcpy(e->gamecode, dir.gamecode, 4);  e->gamecode[4] = 0;
             memcpy(e->company, dir.company, 2);    e->company[2] = 0;
             memcpy(e->filename, dir.filename, 32); e->filename[32] = 0;
-            /* Length isn't in card_dir; we'd need CARD_GetStatus or open
-             * the file. Defer to read time. */
-            e->length = 0;
+            e->length = dir.filelen;
             e->game = g;
+            /* Stash the whole card_dir so the read side can call
+             * CARD_OpenEntry without re-doing the lookup. */
+            memcpy(e->_dir_blob, &dir, sizeof dir);
         }
         ret = CARD_FindNext(&dir);
     }
@@ -72,38 +86,102 @@ int pb_card_scan(pb_card_entry_t *out, int max) {
     return total;
 }
 
-size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf, size_t max_bytes) {
-    if (!entry || !out_buf) return 0;
+const char *pb_card_err_str(pb_card_err_t e) {
+    switch (e) {
+        case PB_CARD_OK:           return "OK";
+        case PB_CARD_ERR_BAD_ARGS: return "bad args";
+        case PB_CARD_ERR_MOUNT:    return "CARD_Mount failed";
+        case PB_CARD_ERR_OPEN:     return "CARD_Open failed";
+        case PB_CARD_ERR_ZERO_LEN: return "file length = 0";
+        case PB_CARD_ERR_ALLOC:    return "out of memory";
+        case PB_CARD_ERR_READ:     return "CARD_Read failed";
+    }
+    return "?";
+}
+
+size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
+                         size_t max_bytes, pb_card_read_status_t *status) {
+    pb_card_read_status_t local = {0};
+    if (!status) status = &local;
+    status->stage = PB_CARD_OK;
+    status->libogc_rc = 0;
+    status->cf_len = 0;
+    status->bytes_read = 0;
+
+    if (!entry || !out_buf) { status->stage = PB_CARD_ERR_BAD_ARGS; return 0; }
     ensure_inited();
-    if (CARD_Mount(entry->slot, s_workarea, NULL) < 0) return 0;
+
+    int rc = CARD_Mount(entry->slot, s_workarea, NULL);
+    if (rc < 0) {
+        status->stage = PB_CARD_ERR_MOUNT;
+        status->libogc_rc = rc;
+        return 0;
+    }
+
+    /* GCMM canonical pattern: tell libogc which game's file we're
+     * about to open (the directory filter matches gamecode+company),
+     * then CARD_Open looks up by filename within those filters.
+     * Same approach used by suloku's GCMM mcard.c. */
+    CARD_SetGamecode((const char *)entry->gamecode);
+    CARD_SetCompany((const char *)entry->company);
 
     card_file cf;
-    int err = CARD_Open(entry->slot, (char *)entry->filename, &cf);
-    if (err < 0) { CARD_Unmount(entry->slot); return 0; }
+    rc = CARD_Open(entry->slot, (char *)entry->filename, &cf);
+    if (rc < 0) {
+        status->stage = PB_CARD_ERR_OPEN;
+        status->libogc_rc = rc;
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
 
-    /* CARD_Read requires aligned multi-sector reads (sector = 0x2000 bytes
-     * on standard memcards). Round up to sector boundary and clamp to
-     * max_bytes. */
     uint32_t flen = (uint32_t)cf.len;
+    status->cf_len = flen;
+    if (flen == 0) {
+        status->stage = PB_CARD_ERR_ZERO_LEN;
+        CARD_Close(&cf);
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+
+    /* CARD_Read requires offset and len to be multiples of CARD_READSIZE
+     * (512 bytes) and offset+len must not exceed file->len. We clamp to
+     * cf.len, then round DOWN to a 512 multiple. The tail (< 512 bytes,
+     * unlikely for save files) is lost but no Pokemon save format relies
+     * on it. */
+    const uint32_t READSIZE = 512;
     uint32_t to_read = flen;
     if (to_read > max_bytes) to_read = (uint32_t)max_bytes;
-    /* CARD_Read offset/len must be sector-aligned. We allocate a sector-
-     * aligned scratch buffer, read in chunks, then copy into out_buf. */
-    const uint32_t SECTOR = 0x2000;
-    uint32_t rounded = ((to_read + SECTOR - 1) / SECTOR) * SECTOR;
-    uint8_t *scratch = memalign(32, rounded);
-    if (!scratch) { CARD_Close(&cf); CARD_Unmount(entry->slot); return 0; }
-
-    size_t got = 0;
-    for (uint32_t off = 0; off < rounded; off += SECTOR) {
-        if (CARD_Read(&cf, scratch + off, SECTOR, off) < 0) break;
-        got += SECTOR;
+    uint32_t aligned = (to_read / READSIZE) * READSIZE;
+    if (aligned == 0) {
+        status->stage = PB_CARD_ERR_ZERO_LEN;
+        CARD_Close(&cf);
+        CARD_Unmount(entry->slot);
+        return 0;
     }
+
+    uint8_t *scratch = memalign(32, aligned);
+    if (!scratch) {
+        status->stage = PB_CARD_ERR_ALLOC;
+        CARD_Close(&cf);
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+
+    /* Single big read. libogc CARD_Read internally chunks down to the
+     * physical sector size. */
+    rc = CARD_Read(&cf, scratch, aligned, 0);
     CARD_Close(&cf);
     CARD_Unmount(entry->slot);
 
-    if (got > to_read) got = to_read;
-    memcpy(out_buf, scratch, got);
+    if (rc < 0) {
+        status->stage = PB_CARD_ERR_READ;
+        status->libogc_rc = rc;
+        free(scratch);
+        return 0;
+    }
+
+    memcpy(out_buf, scratch, aligned);
     free(scratch);
-    return got;
+    status->bytes_read = aligned;
+    return aligned;
 }

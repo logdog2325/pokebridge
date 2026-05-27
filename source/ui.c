@@ -2141,7 +2141,7 @@ void pb_ui_run_graphics_app(void) {
                                         "Looking for these game codes on slot A or B:");
                             pb_gfx_text(110, 200, PB_GFX_COLOR_TEXT, "GXX* - Pokemon XD: Gale of Darkness");
                             pb_gfx_text(110, 216, PB_GFX_COLOR_TEXT, "GC6* - Pokemon Colosseum");
-                            pb_gfx_text(110, 232, PB_GFX_COLOR_TEXT, "G3R* - Pokemon Box: Ruby & Sapphire");
+                            pb_gfx_text(110, 232, PB_GFX_COLOR_TEXT, "GPX* - Pokemon Box: Ruby & Sapphire");
                             pb_gfx_text(90, 262, PB_GFX_COLOR_TEXT_DIM,
                                         "Insert a memory card with one of those saves,");
                             pb_gfx_text(90, 278, PB_GFX_COLOR_TEXT_DIM,
@@ -2191,15 +2191,34 @@ void pb_ui_run_graphics_app(void) {
                         if (bb & PAD_BUTTON_DOWN) csel = (csel + 1) % n_cards;
                         if (bb & PAD_BUTTON_A) {
                             static uint8_t cardbuf[PB_CARD_MAX_FILE_BYTES];
+                            pb_card_read_status_t rs;
                             size_t got = pb_card_read_file(&cards[csel], cardbuf,
-                                                           sizeof cardbuf);
+                                                           sizeof cardbuf, &rs);
                             if (got == 0) {
-                                /* Read failed -- show error */
+                                /* Read failed -- show diagnostic info */
                                 pb_gfx_clear();
-                                gfx_draw_title_bar("Read failed");
-                                gfx_draw_panel(120, 180, 400, 140, NULL);
-                                pb_gfx_text(140, 220, PB_GFX_COLOR_PANEL_ACCENT,
-                                            "Card read failed. Card removed?");
+                                gfx_draw_title_bar("Memcard read failed");
+                                gfx_draw_panel(60, 110, 520, 260, NULL);
+                                pb_gfx_text(90, 140, PB_GFX_COLOR_PANEL_ACCENT,
+                                            "Could not read the file off the card.");
+                                char line[96];
+                                snprintf(line, sizeof line, "Stage: %s",
+                                         pb_card_err_str(rs.stage));
+                                pb_gfx_text(90, 170, PB_GFX_COLOR_TEXT, line);
+                                snprintf(line, sizeof line, "libogc return code: %d",
+                                         rs.libogc_rc);
+                                pb_gfx_text(90, 190, PB_GFX_COLOR_TEXT, line);
+                                snprintf(line, sizeof line, "CARD_Open reported length: %u bytes",
+                                         (unsigned)rs.cf_len);
+                                pb_gfx_text(90, 210, PB_GFX_COLOR_TEXT, line);
+                                snprintf(line, sizeof line, "Slot: %c   Filename: %s",
+                                         cards[csel].slot == 0 ? 'A' : 'B',
+                                         cards[csel].filename);
+                                pb_gfx_text(90, 240, PB_GFX_COLOR_TEXT_DIM, line);
+                                pb_gfx_text(90, 280, PB_GFX_COLOR_TEXT_DIM,
+                                            "libogc: -1 busy, -2 wrongdev, -3 nocard,");
+                                pb_gfx_text(90, 296, PB_GFX_COLOR_TEXT_DIM,
+                                            "-4 nofile, -5 ioerror, -128 fatal");
                                 gfx_draw_hint_bar("Press any button");
                                 pb_gfx_flip();
                                 pb_gfx_wait_button();

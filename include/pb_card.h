@@ -26,13 +26,22 @@ typedef enum {
     PB_CARD_GAME_BOX,
 } pb_card_game_t;
 
+/* sizeof(card_dir) is ~56 bytes in libogc; 96 leaves headroom for any
+ * future struct growth. Treated as opaque from outside pb_card.c -- we
+ * stash the full FindFirst/FindNext result so we can later call
+ * CARD_OpenEntry without re-resolving the file by gamecode+filename
+ * (which is what was failing: CARD_Open filters by current CARD_Init
+ * gamecode and we're reading other games' saves). */
+#define PB_CARD_DIR_BLOB_SIZE 96
+
 typedef struct {
     int      slot;        /* 0 = slot A, 1 = slot B */
     char     gamecode[5]; /* 4 chars + NUL */
     char     company[3];  /* 2 chars + NUL */
     char     filename[33];/* 32 chars + NUL */
-    uint32_t length;      /* file size in bytes (set after CARD_Open) */
+    uint32_t length;      /* file size in bytes (from card_dir.filelen) */
     pb_card_game_t game;  /* detected game by gamecode */
+    uint8_t  _dir_blob[PB_CARD_DIR_BLOB_SIZE]; /* opaque card_dir copy */
 } pb_card_entry_t;
 
 /* Scan slot A and slot B for Pokémon save files. Fills `out` with up to
@@ -40,10 +49,33 @@ typedef struct {
  * unformatted are silently skipped. */
 int pb_card_scan(pb_card_entry_t *out, int max);
 
+/* Diagnostic info from the last read attempt -- populated even on
+ * failure so the UI can report exactly where things went wrong. */
+typedef enum {
+    PB_CARD_OK = 0,
+    PB_CARD_ERR_BAD_ARGS,
+    PB_CARD_ERR_MOUNT,
+    PB_CARD_ERR_OPEN,
+    PB_CARD_ERR_ZERO_LEN,
+    PB_CARD_ERR_ALLOC,
+    PB_CARD_ERR_READ,
+} pb_card_err_t;
+
+typedef struct {
+    pb_card_err_t stage;     /* PB_CARD_OK on success, else where it failed */
+    int           libogc_rc; /* raw libogc return code at the failing step */
+    uint32_t      cf_len;    /* file->len reported by CARD_Open */
+    size_t        bytes_read;/* how many bytes we actually copied out */
+} pb_card_read_status_t;
+
 /* Read the bytes of a card file into `out_buf`. Returns the number of
- * bytes read, or 0 on failure. The card must still be present in the
- * slot (we don't keep mounts open between calls). */
-size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf, size_t max_bytes);
+ * bytes read, or 0 on failure. If `status` is non-NULL, it's filled in
+ * with diagnostic info regardless of success. The card must still be
+ * present in the slot (we don't keep mounts open between calls). */
+size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
+                          size_t max_bytes, pb_card_read_status_t *status);
+
+const char *pb_card_err_str(pb_card_err_t e);
 
 const char *pb_card_game_name(pb_card_game_t g);
 
