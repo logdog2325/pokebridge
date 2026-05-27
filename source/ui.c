@@ -543,13 +543,15 @@ static bool gfx_confirm_memcard_save(const char *game_label, const pb_card_entry
         pb_gfx_text(90, 240, PB_GFX_COLOR_TEXT_DIM, line);
 
         pb_gfx_text(90, 280, PB_GFX_COLOR_PANEL_ACCENT,
-                    "This overwrites the existing save on the card.");
-        pb_gfx_text(90, 298, PB_GFX_COLOR_TEXT_DIM,
-                    "Do NOT remove the card while the write is in progress.");
-        pb_gfx_text(90, 316, PB_GFX_COLOR_TEXT_DIM,
-                    "If you have any second thoughts, back out and");
-        pb_gfx_text(90, 332, PB_GFX_COLOR_TEXT_DIM,
-                    "manually back the file up with GCMM first.");
+                    "!! BACK UP THIS SAVE WITH GCMM FIRST !!");
+        pb_gfx_text(90, 298, PB_GFX_COLOR_TEXT,
+                    "This overwrites the on-card file with no undo.");
+        pb_gfx_text(90, 314, PB_GFX_COLOR_TEXT_DIM,
+                    "PokeBridge self-verifies before writing, but if");
+        pb_gfx_text(90, 330, PB_GFX_COLOR_TEXT_DIM,
+                    "the algorithm has a bug your save can be lost.");
+        pb_gfx_text(90, 348, PB_GFX_COLOR_TEXT_DIM,
+                    "Don't remove the card during the write.");
 
         gfx_draw_hint_bar("A: confirm save   B: cancel");
         pb_gfx_flip();

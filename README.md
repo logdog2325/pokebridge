@@ -4,6 +4,14 @@ A **GameCube homebrew app** for reading, editing, and exporting Pokémon Gen 3 s
 
 The interface is fully graphical with a Pokémon Box: Ruby & Sapphire aesthetic — pastel-blue gradient backgrounds, rounded translucent panels, real Gen 3-style sprites for **all 1025 species + shiny variants**, and box-art previews for every mainstream Gen 3-era game.
 
+> ## ⚠️ Back up your saves first
+>
+> PokéBridge writes directly to physical GameCube memory cards. **Always back up your `.gci` files with [GCMM](https://github.com/suloku/gcmm) before using the "Save to memory card" feature.**
+>
+> v0.5 includes a self-verify step that re-parses our own re-encrypted output before touching the card, but the algorithm-level test suite is small and a future bug could still produce a save the game refuses to load. The bytes you write replace what's on the card with no undo.
+>
+> A v0.5 prerelease build *did* corrupt a tester's real XD save during development — the bug is fixed, but please don't be the person who finds the next one without a backup. GCMM is small, fast, and handles all three Gen 3 GameCube games cleanly.
+
 ## What it does
 
 - **Read** Gen 3 GBA `.sav` files (128 KB) directly from SD card via Swiss
