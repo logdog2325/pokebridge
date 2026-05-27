@@ -204,22 +204,31 @@ pb_joybus_status_t pb_joybus_multiboot(int port,
 pb_joybus_status_t pb_joybus_get_cart_info(int port, pb_joybus_cart_info_t *info) {
     if (!info) return PB_JOYBUS_NO_CART;
     memset(info, 0, sizeof *info);
-    /* Wait for the dumper to signal ready (sends 0). */
-    if (jb_recv(port) != 0) return PB_JOYBUS_NO_CART;
+    /* Wait for the dumper to signal ready (sends 0). Flash carts can be a
+     * couple seconds slower than retail carts to respond. */
+    int handshake_wait = 0;
+    while (jb_recv(port) != 0) {
+        if (++handshake_wait > 600) return PB_JOYBUS_NO_CART;
+    }
 
-    /* Dumper sends gbasize then savesize, both BE u32. */
+    /* Dumper sends gbasize then savesize, both BE u32. Allow up to ~10s for
+     * flash-cart SRAM size detection. */
     uint32_t gbasize = 0;
     int wait = 0;
-    while (gbasize == 0 && wait < 200) {
+    while (gbasize == 0 && wait < 600) {
         gbasize = __builtin_bswap32(jb_recv(port));
         wait++;
     }
     jb_send(port, 0);
     uint32_t savesize = __builtin_bswap32(jb_recv(port));
     jb_send(port, 0);
-    if (gbasize == (uint32_t)-1) return PB_JOYBUS_NO_CART;
+    /* Don't treat (uint32_t)-1 as fatal -- some ROM hack carts report it.
+     * Just leave gbasize as-is and let downstream code decide. */
 
-    /* Fetch 0xC0-byte ROM header. */
+    /* Fetch 0xC0-byte ROM header. ROM hacks frequently have non-standard
+     * game IDs ("BPRX" rather than "BPRE", custom company IDs, etc.) --
+     * pass them through verbatim; the downstream save parser is what
+     * actually decides if the data is usable. */
     uint8_t hdr[0xC0];
     for (uint32_t i = 0; i < 0xC0; i += 4) {
         *(volatile uint32_t *)(hdr + i) = jb_recv(port);
@@ -240,21 +249,31 @@ pb_joybus_status_t pb_joybus_dump_save(int port, uint8_t *out, size_t max_len,
                                        pb_joybus_progress_cb cb, void *ctx) {
     if (!out || !out_len) return PB_JOYBUS_SAVE_TOO_BIG;
     *out_len = 0;
-    /* Send command 2 = backup save. */
     jb_send(port, 2);
+
     /* Dumper performs cart->host SRAM read; after some prep it streams the
-     * save size back as BE u32, then the bytes. */
+     * save size back as BE u32, then the bytes. Flash carts (EZ-Flash,
+     * Everdrive, etc.) take longer than retail SRAM -- allow ~10s. */
     uint32_t savesize = 0;
     int wait = 0;
-    while (savesize == 0 && wait < 400) {
+    while (savesize == 0 && wait < 600) {
         savesize = __builtin_bswap32(jb_recv(port));
         wait++;
     }
     if (savesize == 0) return PB_JOYBUS_NO_CART;
-    if (savesize > max_len) return PB_JOYBUS_SAVE_TOO_BIG;
-    jb_send(port, 0);  /* ack savesize */
+    jb_send(port, 0);
 
-    for (uint32_t i = 0; i < savesize; i += 4) {
+    /* Be lenient with weird-sized saves. If the cart reports more than the
+     * caller's buffer can hold, just read what fits (truncating tail bytes
+     * keeps the more-important slot A intact). If the dumper insists on
+     * sending the full count we still recv-and-discard the overflow so the
+     * stream stays in sync. */
+    uint32_t to_store = savesize;
+    if (to_store > max_len) to_store = (uint32_t)max_len;
+
+    uint32_t i = 0;
+    /* Read into caller buffer up to to_store. */
+    for (; i < to_store; i += 4) {
         uint32_t w = jb_recv(port);
         out[i + 0] = (uint8_t)(w      );
         out[i + 1] = (uint8_t)(w >>  8);
@@ -264,6 +283,10 @@ pb_joybus_status_t pb_joybus_dump_save(int port, uint8_t *out, size_t max_len,
             if (!cb(i, savesize, ctx)) return PB_JOYBUS_USER_CANCEL;
         }
     }
-    *out_len = savesize;
+    /* Drain any overflow so the GBA side doesn't stall on backpressure. */
+    for (; i < savesize; i += 4) {
+        (void)jb_recv(port);
+    }
+    *out_len = to_store;
     return PB_JOYBUS_OK;
 }

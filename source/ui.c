@@ -1891,8 +1891,9 @@ void pb_ui_run_graphics_app(void) {
                         break;
                     }
 
-                    /* Dump the save. */
-                    static uint8_t cart_save[PB_SAVE_SIZE + 1024];
+                    /* Dump the save. Sized to cover the largest GBA SRAM
+                     * (512 KB) plus slop, so unusual ROM-hack carts fit. */
+                    static uint8_t cart_save[0x80000 + 4096];
                     size_t got = 0;
                     st = pb_joybus_dump_save(port, cart_save, sizeof cart_save,
                                              &got, NULL, NULL);
@@ -1902,10 +1903,29 @@ void pb_ui_run_graphics_app(void) {
                         gfx_draw_panel(120, 180, 400, 140, NULL);
                         pb_gfx_text(140, 220, PB_GFX_COLOR_PANEL_ACCENT,
                                     "Save dump did not complete.");
+                        char ds[64];
+                        snprintf(ds, sizeof ds, "Got %u bytes (need %d).",
+                                 (unsigned)got, (int)PB_SLOT_SIZE);
+                        pb_gfx_text(140, 240, PB_GFX_COLOR_TEXT_DIM, ds);
                         gfx_draw_hint_bar("Press any button");
                         pb_gfx_flip();
                         pb_gfx_wait_button();
                         break;
+                    }
+
+                    /* Always offer to dump the raw bytes to SD before we try
+                     * to parse -- if the parser rejects (uncommon but
+                     * possible for weird ROM hack saves) the user can still
+                     * pull the .sav from SD into PKHeX. */
+                    if (pb_sd_available) {
+                        mkdir("sd:/pokebridge", 0777);
+                        mkdir("sd:/pokebridge/saves", 0777);
+                        char rawpath[96];
+                        snprintf(rawpath, sizeof rawpath,
+                                 "sd:/pokebridge/saves/cart_%s.sav",
+                                 info.game_id[0] ? info.game_id : "unknown");
+                        FILE *rf = fopen(rawpath, "wb");
+                        if (rf) { fwrite(cart_save, 1, got, rf); fclose(rf); }
                     }
 
                     /* Hand off to the existing graphics-mode party browser. */
