@@ -14,6 +14,8 @@
 #include <gccore.h>
 #include <wiiuse/wpad.h>  /* harmless on GC; provides PAD_BUTTON_* via libogc */
 #include <ogc/pad.h>
+#include <ogc/system.h>
+#include <ogc/irq.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,37 @@
 #include <sys/stat.h>
 
 extern bool pb_sd_available;
+
+/* Swiss / PSO-SDload reload stub lives at 0x80001800.
+ *   0x80001800: branch instruction (entry point)
+ *   0x80001804..0x8000180B: ASCII "STUBHAXX" (Swiss + HBC + recent loaders)
+ *   Legacy PSO/SDload form: first word at 0x80001800 == 0x7c6000a6.
+ * Modern libogc (~2021+) already checks STUBHAXX on main() return, but
+ * older devkitPPC just calls SYS_HOTRESET unconditionally and lands on
+ * the GameCube IPL. Detect + jump explicitly so behavior is consistent
+ * across toolchain versions. */
+static void (* const pb_reload_stub)(void) = (void (*)(void))0x80001800;
+
+static int pb_stub_present(void) {
+    if (*(volatile unsigned int *)0x80001804 == 0x53545542u && /* 'STUB' */
+        *(volatile unsigned int *)0x80001808 == 0x48415858u)   /* 'HAXX' */
+        return 1;
+    if (*(volatile unsigned int *)0x80001800 == 0x7c6000a6u)   /* PSO-SDload */
+        return 1;
+    return 0;
+}
+
+static void pb_exit_to_loader(void) {
+    if (pb_stub_present()) {
+        IRQ_Disable();
+        SYS_ResetSystem(SYS_SHUTDOWN, 0, 0);
+        pb_reload_stub();   /* jumps back to Swiss; never returns */
+    }
+    /* No loader present (booted directly via boot.dol from IPL, e.g.) --
+     * warm-reset back to the GameCube logo / disc menu. */
+    SYS_ResetSystem(SYS_HOTRESET, 0, 0);
+    __builtin_unreachable();
+}
 
 static void *xfb = NULL;
 static GXRModeObj *rmode = NULL;
@@ -2687,16 +2720,22 @@ void pb_ui_run_graphics_app(void) {
                         pb_gfx_clear();
                         gfx_draw_title_bar("Exit PokeBridge");
                         gfx_draw_panel(120, 140, 400, 240, NULL);
+                        int back_to_swiss = pb_stub_present();
                         pb_gfx_text(150, 180, PB_GFX_COLOR_TEXT_ACCENT,
-                                    "Return to Swiss / boot menu?");
-                        pb_gfx_text(150, 220, PB_GFX_COLOR_TEXT,
-                                    "If you launched from Swiss you'll go");
-                        pb_gfx_text(150, 238, PB_GFX_COLOR_TEXT,
-                                    "back to the Swiss file picker.");
-                        pb_gfx_text(150, 270, PB_GFX_COLOR_TEXT_DIM,
-                                    "Otherwise the console will return to");
-                        pb_gfx_text(150, 288, PB_GFX_COLOR_TEXT_DIM,
-                                    "the GameCube logo / IPL menu.");
+                                    back_to_swiss
+                                      ? "Return to Swiss?"
+                                      : "Return to GameCube IPL?");
+                        if (back_to_swiss) {
+                            pb_gfx_text(150, 220, PB_GFX_COLOR_TEXT,
+                                        "Swiss reload stub detected --");
+                            pb_gfx_text(150, 238, PB_GFX_COLOR_TEXT,
+                                        "you'll drop back at the file picker.");
+                        } else {
+                            pb_gfx_text(150, 220, PB_GFX_COLOR_TEXT,
+                                        "No Swiss stub at 0x80001800.");
+                            pb_gfx_text(150, 238, PB_GFX_COLOR_TEXT,
+                                        "Will warm-reset to the GC logo.");
+                        }
                         pb_gfx_text(150, 330, PB_GFX_COLOR_PANEL_ACCENT,
                                     "Any unsaved edits will be lost.");
                         gfx_draw_hint_bar("A: exit   B: cancel");
@@ -2711,7 +2750,8 @@ void pb_ui_run_graphics_app(void) {
                             pb_gfx_flip();
                             VIDEO_WaitVSync();
                             VIDEO_WaitVSync();
-                            return;
+                            pb_exit_to_loader();  /* never returns */
+                            return; /* unreachable, satisfies the compiler */
                         }
                         if (bb & PAD_BUTTON_B) break;
                     }
