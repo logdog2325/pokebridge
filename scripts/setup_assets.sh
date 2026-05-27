@@ -96,24 +96,29 @@ for kind in save emerald_save xd_save colo_save; do
     fi
 done
 
-# 8. Stub for the embedded background music. Use embed_audio.py to
-# replace this with a real song.
-if [[ ! -f include/embedded_title_audio.h ]]; then
-    echo "==> Creating empty stub include/embedded_title_audio.h"
-    {
-        echo "/* Placeholder for a personal background-music WAV (gitignored). */"
-        echo "/* See README.md > 'Optional: embed background music'. */"
-        echo "#ifndef POKEBRIDGE_EMBEDDED_TITLE_AUDIO_H"
-        echo "#define POKEBRIDGE_EMBEDDED_TITLE_AUDIO_H"
-        echo "#include <stdint.h>"
-        echo "#define pb_embedded_title_audio_sample_rate 22050"
-        echo "#define pb_embedded_title_audio_channels    1"
-        echo "#define pb_embedded_title_audio_bits        16"
-        echo "#define pb_embedded_title_audio_len         0"
-        echo "static const uint8_t pb_embedded_title_audio[1] = {0};"
-        echo "#endif"
-    } > include/embedded_title_audio.h
-fi
+# 8. Stubs for the embedded background music playlist. Use
+# embed_audio.py to replace any of these with a real song.
+for atrack in title match colosseum; do
+    h="include/embedded_${atrack}_audio.h"
+    if [[ ! -f "$h" ]]; then
+        sym="pb_embedded_${atrack}_audio"
+        GUARD="POKEBRIDGE_EMBEDDED_$(echo "$atrack" | tr a-z A-Z)_AUDIO_H"
+        echo "==> Creating empty stub $h"
+        {
+            echo "/* Placeholder for a personal background-music WAV (gitignored). */"
+            echo "/* See README.md > 'Optional: embed background music'. */"
+            echo "#ifndef $GUARD"
+            echo "#define $GUARD"
+            echo "#include <stdint.h>"
+            echo "#define ${sym}_sample_rate 22050"
+            echo "#define ${sym}_channels    1"
+            echo "#define ${sym}_bits        16"
+            echo "#define ${sym}_len         0"
+            echo "static const uint8_t ${sym}[1] = {0};"
+            echo "#endif"
+        } > "$h"
+    fi
+done
 
 echo ""
 echo "==> Setup complete. You can now build with:"

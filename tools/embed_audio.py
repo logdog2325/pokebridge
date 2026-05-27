@@ -18,7 +18,9 @@ import os
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KINDS = {
-    "title": ("embedded_title_audio.h", "pb_embedded_title_audio"),
+    "title":     ("embedded_title_audio.h",     "pb_embedded_title_audio"),
+    "match":     ("embedded_match_audio.h",     "pb_embedded_match_audio"),
+    "colosseum": ("embedded_colosseum_audio.h", "pb_embedded_colosseum_audio"),
 }
 
 

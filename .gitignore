@@ -22,9 +22,11 @@ data/*.sav
 data/*.gci
 data/*.gcs
 
-# Personal background music -- bring your own WAV via
-# `python3 tools/embed_audio.py title path/to/song.wav`.
+# Personal background music -- bring your own WAVs via
+# `python3 tools/embed_audio.py {title,match,colosseum} path/to/song.wav`.
 include/embedded_title_audio.h
+include/embedded_match_audio.h
+include/embedded_colosseum_audio.h
 data/*.wav
 
 # Vendor reference checkouts (cloned by scripts/setup_assets.sh)

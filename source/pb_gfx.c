@@ -1,4 +1,5 @@
 #include "pb_gfx.h"
+#include "pb_audio.h"
 #include "embedded_sprites.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_test_font.h>
@@ -221,6 +222,7 @@ uint16_t pb_gfx_wait_button(void) {
     while (1) {
         VIDEO_WaitVSync();
         PAD_ScanPads();
+        pb_audio_tick();  /* drive the BGM playlist between input frames */
         uint16_t pressed = PAD_ButtonsDown(0);
         if (pressed) return pressed;
     }

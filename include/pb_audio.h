@@ -29,4 +29,10 @@ bool pb_audio_is_muted(void);
 void pb_audio_suspend(void);
 void pb_audio_resume(void);
 
+/* Drive the playlist forward. Must be called regularly (~vsync rate
+ * is fine) so the software-timer-based track advance can run. The
+ * main pb_gfx_wait_button loop is the natural place. Cheap: just a
+ * gettime() compare against the current track's known duration. */
+void pb_audio_tick(void);
+
 #endif
