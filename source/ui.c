@@ -1758,6 +1758,57 @@ void pb_ui_run_graphics_app(void) {
                     break;
                 }
                 case 4: {
+                    /* Hidden diagnostic: hold Z when entering link-cable to
+                     * get the raw-SI debug screen instead. */
+                    PAD_ScanPads();
+                    if (PAD_ButtonsHeld(0) & PAD_TRIGGER_Z) {
+                        /* Joybus debug screen -- continuously prints raw
+                         * SI_GetTypeAsync responses for all 4 ports. */
+                        for (;;) {
+                            uint32_t resps[4] = {0};
+                            for (int p = 0; p < 4; p++) {
+                                extern int pb_joybus_probe_port(int port, uint32_t *out);
+                                pb_joybus_probe_port(p, &resps[p]);
+                            }
+                            pb_gfx_clear();
+                            gfx_draw_title_bar("Joybus debug");
+                            gfx_draw_panel(60, 80, 520, 280, "SI_GetTypeAsync raw");
+                            pb_gfx_text(80, 110, PB_GFX_COLOR_TEXT_DIM,
+                                        "Live SI response codes (polled each frame):");
+                            for (int p = 0; p < 4; p++) {
+                                char line[80];
+                                const char *interp = "unknown";
+                                if (resps[p] == 0)              interp = "no device / silent bus";
+                                else if (resps[p] == 0x80)      interp = "device not ready (retry)";
+                                else if (resps[p] & 8)          interp = "device not ready (retry)";
+                                else if (resps[p] & 0x40000)    interp = "GBA detected!";
+                                else if (resps[p] & 0x09000000) interp = "GameCube controller";
+                                snprintf(line, sizeof line, "Port %d: 0x%08X  %s",
+                                         p + 1, (unsigned)resps[p], interp);
+                                uint32_t col = (resps[p] & 0x40000)
+                                             ? PB_GFX_COLOR_TEXT_ACCENT
+                                             : PB_GFX_COLOR_TEXT;
+                                pb_gfx_text(80, 140 + p * 24, col, line);
+                            }
+                            pb_gfx_text(80, 260, PB_GFX_COLOR_TEXT_DIM,
+                                        "Expected: a GBA with link cable shows 0x00040000+");
+                            pb_gfx_text(80, 276, PB_GFX_COLOR_TEXT_DIM,
+                                        "(SI_GBA bit set). If all ports stay 0x00000000,");
+                            pb_gfx_text(80, 292, PB_GFX_COLOR_TEXT_DIM,
+                                        "the SI bus is silent and the cable/port isn't seen.");
+                            pb_gfx_text(80, 312, PB_GFX_COLOR_TEXT_DIM,
+                                        "If a port toggles 0x80 / bit 8, GBA is responding");
+                            pb_gfx_text(80, 328, PB_GFX_COLOR_TEXT_DIM,
+                                        "but BIOS isn't ready -- power-cycle the GBA.");
+                            gfx_draw_hint_bar("B: back");
+                            pb_gfx_flip();
+                            PAD_ScanPads();
+                            if (PAD_ButtonsDown(0) & PAD_BUTTON_B) break;
+                            VIDEO_WaitVSync();
+                        }
+                        break;
+                    }
+
                     /* GBA cart via link cable. */
                     pb_gfx_clear();
                     gfx_draw_title_bar("GBA Link Cable");

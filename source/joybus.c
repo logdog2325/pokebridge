@@ -126,6 +126,18 @@ int pb_joybus_detect_gba_port(void) {
  * power-on to transition from its splash to the multiboot wait state. The
  * optional callback gets called once per vsync with the current port being
  * polled (0..3) so the UI can show progress; return false to abort. */
+/* Diagnostic helper: probe a single port and return the raw SI response.
+ * Used by the Joybus debug UI to expose what the bus is actually seeing. */
+int pb_joybus_probe_port(int port, uint32_t *out) {
+    ensure_bufs();
+    if (port < 0 || port > 3 || !out) return -1;
+    g_resval = 0;
+    SI_GetTypeAsync(port, acb);
+    for (int i = 0; i < 4 && g_resval == 0; i++) VIDEO_WaitVSync();
+    *out = g_resval;
+    return 0;
+}
+
 int pb_joybus_wait_for_gba(int timeout_vsyncs, pb_joybus_progress_cb cb, void *ctx) {
     ensure_bufs();
     int port = 0;
