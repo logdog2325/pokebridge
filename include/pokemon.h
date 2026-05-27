@@ -82,6 +82,11 @@ void pb_pkm_ivs(const pb_pkm_t *p, uint8_t ivs[6]);
  * out_buf must be at least len+1 bytes. */
 void pb_gen3_to_ascii(const uint8_t *in, int len, char *out_buf);
 
+/* Inverse: encode an ASCII string into the Gen 3 charset, padding the
+ * fixed-length output with 0xFF (terminator). Used by the nickname
+ * editor to write back into pb_pkm_t.nickname or .ot_name. */
+void pb_ascii_to_gen3(const char *in, uint8_t *out, int dst_len);
+
 /* Re-encrypt a pokemon record after edits. Recomputes the checksum and writes
  * back to the 80-byte buffer in the original substructure order. */
 void pb_pkm_encode(const pb_pkm_t *p, uint8_t raw_out[80]);
@@ -91,6 +96,11 @@ const char *pb_species_name(uint16_t species);
 
 /* Look up a Gen 3 move name (#1..#354). Returns "???" for invalid IDs. */
 const char *pb_move_name(uint16_t move_id);
+
+/* Look up a Gen 3 hold-item name. Returns "(none)" for 0, "(other)"
+ * for IDs not in our curated table (mostly key items / TMs / Pokéballs
+ * that don't make sense to hold). */
+const char *pb_item_name(uint16_t item_id);
 
 /* --- Editor helpers --- */
 

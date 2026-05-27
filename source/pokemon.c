@@ -159,6 +159,30 @@ void pb_pkm_encode(const pb_pkm_t *p, uint8_t raw_out[80]) {
     for (int i = 0; i < 48; i++) raw_out[32 + i] = decrypted[i] ^ kb[i & 3];
 }
 
+/* Encode ASCII -> Gen 3 charset into a fixed-length buffer. Pads with
+ * 0xFF (Gen 3 string terminator) after the last character. Used by the
+ * nickname editor. `dst_len` is the buffer size (10 for nicknames, 7
+ * for OT names). Letters / digits / space / a small set of punctuation
+ * are encoded; unknown chars become space. */
+void pb_ascii_to_gen3(const char *in, uint8_t *out, int dst_len) {
+    int j = 0;
+    for (int i = 0; in[i] && j < dst_len; i++) {
+        char c = in[i];
+        uint8_t b;
+        if (c >= '0' && c <= '9')      b = 0xA1 + (uint8_t)(c - '0');
+        else if (c >= 'A' && c <= 'Z') b = 0xBB + (uint8_t)(c - 'A');
+        else if (c >= 'a' && c <= 'z') b = 0xD5 + (uint8_t)(c - 'a');
+        else if (c == ' ')             b = 0x00;
+        else if (c == '.')             b = 0xB6;
+        else if (c == '-')             b = 0xB7;
+        else if (c == '!')             b = 0xAB;
+        else if (c == '?')             b = 0xAC;
+        else                           b = 0x00; /* space for anything weird */
+        out[j++] = b;
+    }
+    while (j < dst_len) out[j++] = 0xFF; /* terminator + pad */
+}
+
 /* Gen 3 charset decode mirror of save.c's table — duplicated here so other
  * modules can call it without pulling in save.c. Kept simple to limit churn. */
 void pb_gen3_to_ascii(const uint8_t *in, int len, char *out_buf) {
@@ -204,6 +228,17 @@ const char *pb_move_name(uint16_t move_id) {
     if (move_id > 354) return "???";
     if (pb_move_names_gen3[move_id]) return pb_move_names_gen3[move_id];
     return "???";
+}
+
+#include "item_names_gen3.h"
+
+const char *pb_item_name(uint16_t item_id) {
+    if (item_id == 0) return "(none)";
+    if (item_id < (sizeof pb_item_names_gen3 / sizeof pb_item_names_gen3[0])
+        && pb_item_names_gen3[item_id]) {
+        return pb_item_names_gen3[item_id];
+    }
+    return "(other)";
 }
 
 /* --- Editor helpers --- */

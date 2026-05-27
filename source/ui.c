@@ -469,7 +469,7 @@ void pb_ui_browse_boxes(pb_save_t *s) {
 /* Forward decls for the graphics-mode pokemon detail + editor. */
 typedef enum { PB_FMT_PK3 = 0, PB_FMT_XK3 = 1, PB_FMT_CK3 = 2 } pb_fmt_t;
 static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt);
-static bool gfx_edit_pkm(pb_pkm_t *p);
+static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt);
 static void gfx_pkm_box_screen(pb_save_t *s);
 static void gfx_xd_box_screen(pb_xd_save_t *xs);
 static void gfx_colo_party_screen(pb_colo_save_t *cs);
@@ -493,6 +493,11 @@ static void gfx_save_colo_to_memcard(pb_colo_save_t *cs, const pb_card_entry_t *
  * XD/Colo party + box screens which appear above them). */
 static bool gfx_create_xk3_flow(pb_xd_save_t *xs, uint8_t raw_out[196]);
 static bool gfx_create_ck3_flow(pb_colo_save_t *cs, uint8_t raw_out[312]);
+
+/* On-screen keyboard helper (defined later, used by the nickname
+ * editor inside gfx_edit_pkm). */
+static bool gfx_text_input(const char *title, char *out_ascii,
+                           int max_chars, const char *initial);
 
 /* Detect a save file's game by header / size. */
 static pb_boxart_t detect_boxart_from_save(const pb_save_t *s) {
@@ -942,7 +947,7 @@ static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
         uint16_t b = pb_gfx_wait_button();
         if (b & PAD_BUTTON_B) return edited;
         if (b & PAD_BUTTON_X) {
-            if (gfx_edit_pkm(p)) {
+            if (gfx_edit_pkm(p, raw, fmt)) {
                 edited = true;
                 if (raw) {
                     if (fmt == PB_FMT_PK3)      pb_pkm_encode(p, raw);
@@ -1208,6 +1213,97 @@ static int gfx_pick_move(int current) {
     }
 }
 
+/* Item legality filter. Most Gen 3 hold items are universal across
+ * all five games (RS / E / FRLG / Colo / XD) at the save-data level.
+ * The only items the GC games explicitly reject are:
+ *   - 175 Enigma Berry: Colo/XD refuse on transfer
+ *   - 226 Stick:         Outside PKHeX's ItemStorage3{Colo,XD}.General
+ *                        range, mark GBA-only to be safe
+ * Verified via PKHeX's ItemStorage3RS/E/FRLG/Colo/XD tables. */
+static bool item_legal_for_fmt(int item_id, pb_fmt_t fmt) {
+    if (fmt == PB_FMT_XK3 || fmt == PB_FMT_CK3) {
+        if (item_id == 175 || item_id == 226) return false;
+    }
+    return true;
+}
+
+/* Item picker. Walks only the entries we have names for in
+ * pb_item_names_gen3, since paging through 376 raw IDs is unfriendly.
+ * Builds an in-memory index per format so XK3/CK3 saves don't see
+ * the two Gen-3-exclusive items (Enigma Berry, Stick). */
+static int gfx_pick_item(int current, pb_fmt_t fmt) {
+    /* Per-format index so saves from different games see different
+     * legal lists. Cached after first call per format. */
+    static int item_ids_pk3[377];
+    static int n_pk3 = 0;
+    static int item_ids_gc[377];
+    static int n_gc = 0;
+    int *item_ids = (fmt == PB_FMT_PK3) ? item_ids_pk3 : item_ids_gc;
+    int *n_items_p = (fmt == PB_FMT_PK3) ? &n_pk3 : &n_gc;
+
+    if (*n_items_p == 0) {
+        int n = 0;
+        for (int i = 0; i < 377; i++) {
+            const char *nm = pb_item_name((uint16_t)i);
+            /* Skip "(other)" entries -- those are IDs without a curated name. */
+            if (nm && nm[0] != '(' && item_legal_for_fmt(i, fmt)) {
+                item_ids[n++] = i;
+            }
+        }
+        /* Re-add 0 (no held item) explicitly at the front. */
+        for (int i = n; i > 0; i--) item_ids[i] = item_ids[i - 1];
+        item_ids[0] = 0;
+        n++;
+        *n_items_p = n;
+    }
+    int n_items = *n_items_p;
+
+    /* Position selector at the entry matching `current`, or 0 (none). */
+    int sel = 0;
+    for (int i = 0; i < n_items; i++) {
+        if (item_ids[i] == current) { sel = i; break; }
+    }
+
+    const int per_page = 14;
+    for (;;) {
+        int page = sel / per_page;
+        int start = page * per_page;
+        pb_gfx_clear();
+        gfx_draw_title_bar("Pick a held item");
+        gfx_draw_panel(60, 70, 520, 360, "ITEMS");
+        char buf[80];
+        int picked_id = item_ids[sel];
+        snprintf(buf, sizeof buf,
+                 "Page %d / %d   (currently: %s)",
+                 page + 1, (n_items + per_page - 1) / per_page,
+                 picked_id == 0 ? "(none)" : pb_item_name((uint16_t)current));
+        pb_gfx_text(80, 100, PB_GFX_COLOR_TEXT_DIM, buf);
+        for (int i = 0; i < per_page; i++) {
+            int idx = start + i;
+            if (idx >= n_items) break;
+            int yy = 130 + i * 20;
+            uint32_t col = (idx == sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+            if (idx == sel) {
+                pb_gfx_rounded_panel(75, yy - 4, 490, 18, 4, PB_GFX_COLOR_PANEL_LIGHT, 200);
+            }
+            int id = item_ids[idx];
+            snprintf(buf, sizeof buf, "#%3d   %s", id,
+                     id == 0 ? "(no held item)" : pb_item_name((uint16_t)id));
+            pb_gfx_text(90, yy, col, buf);
+        }
+        gfx_draw_hint_bar("DPad: pick   L/R: page   A: equip   Y: clear   B: cancel");
+        pb_gfx_flip();
+        uint16_t bt = pb_gfx_wait_button();
+        if (bt & PAD_BUTTON_B) return -1;
+        if (bt & PAD_BUTTON_Y) return 0;
+        if (bt & PAD_BUTTON_A) return item_ids[sel];
+        if (bt & PAD_BUTTON_UP)   sel = (sel > 0) ? sel - 1 : n_items - 1;
+        if (bt & PAD_BUTTON_DOWN) sel = (sel + 1 < n_items) ? sel + 1 : 0;
+        if (bt & PAD_TRIGGER_L)   sel = (sel >= per_page) ? sel - per_page : 0;
+        if (bt & PAD_TRIGGER_R)   sel = (sel + per_page < n_items) ? sel + per_page : n_items - 1;
+    }
+}
+
 static void gfx_edit_moves_screen(pb_pkm_t *p) {
     int sel = 0;
     for (;;) {
@@ -1280,11 +1376,11 @@ static void gfx_pick_nature(pb_pkm_t *p) {
 
 /* The main graphics-mode editor screen. Returns true if user pressed Y
  * (commit), false on B (cancel). Mutates p in place. */
-static bool gfx_edit_pkm(pb_pkm_t *p) {
+static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
     if (!p || p->is_empty) return false;
     int sel = 0;
     static const char *fields[] = {
-        "IVs", "EVs", "Moves", "Nature", "Shiny", "Friendship", "Held item"
+        "IVs", "EVs", "Moves", "Nature", "Shiny", "Friendship", "Held item", "Nickname"
     };
     const int n = (int)(sizeof fields / sizeof fields[0]);
     for (;;) {
@@ -1346,8 +1442,26 @@ static bool gfx_edit_pkm(pb_pkm_t *p) {
                     snprintf(val, sizeof val, "%u", p->g.friendship);
                     break;
                 case 6:
-                    snprintf(val, sizeof val, "%u", p->g.held_item);
+                    snprintf(val, sizeof val, "%s",
+                             p->g.held_item == 0
+                               ? "(none)"
+                               : pb_item_name(p->g.held_item));
                     break;
+                case 7: {
+                    /* Nickname display. For PK3 the bytes are Gen 3
+                     * charset; for XK3/CK3 they were already decoded
+                     * to ASCII by pb_xk3_to_pkm / pb_ck3_to_pkm. */
+                    char nick[16] = {0};
+                    if (fmt == PB_FMT_PK3) {
+                        pb_gen3_to_ascii(p->nickname, 10, nick);
+                    } else {
+                        memcpy(nick, p->nickname, sizeof nick - 1);
+                        nick[sizeof nick - 1] = 0;
+                    }
+                    snprintf(val, sizeof val, "%s",
+                             nick[0] ? nick : "(none)");
+                    break;
+                }
             }
             pb_gfx_text(385, yy + 16, col, val);
         }
@@ -1368,7 +1482,41 @@ static bool gfx_edit_pkm(pb_pkm_t *p) {
                 case 3: gfx_pick_nature(p); break;
                 case 4: pb_pkm_toggle_shiny(p, !pb_pkm_is_shiny(p)); break;
                 case 5: p->g.friendship = 255; break;
-                case 6: p->g.held_item = 0; break;
+                case 6: {
+                    int picked = gfx_pick_item(p->g.held_item, fmt);
+                    if (picked >= 0) p->g.held_item = (uint16_t)picked;
+                    break;
+                }
+                case 7: {
+                    /* Nickname editor: open the on-screen keyboard pre-
+                     * filled with the current nickname, write the result
+                     * back to whichever offset matches the save format. */
+                    char current[16] = {0};
+                    if (fmt == PB_FMT_PK3) {
+                        pb_gen3_to_ascii(p->nickname, 10, current);
+                    } else {
+                        memcpy(current, p->nickname, sizeof current - 1);
+                    }
+                    char new_nick[16] = {0};
+                    if (gfx_text_input("Edit nickname", new_nick, 10, current)) {
+                        if (fmt == PB_FMT_PK3) {
+                            pb_ascii_to_gen3(new_nick, p->nickname, 10);
+                        } else {
+                            /* Update both the pb_pkm_t copy (so the
+                             * display refreshes) and the format-specific
+                             * UTF-16 BE field in the raw record. */
+                            memset(p->nickname, 0, sizeof p->nickname);
+                            for (int i = 0; i < 10 && new_nick[i]; i++) {
+                                p->nickname[i] = (uint8_t)new_nick[i];
+                            }
+                            if (raw) {
+                                if (fmt == PB_FMT_XK3) pb_xk3_set_nickname(raw, new_nick);
+                                else if (fmt == PB_FMT_CK3) pb_ck3_set_nickname(raw, new_nick);
+                            }
+                        }
+                    }
+                    break;
+                }
             }
         }
         /* L/R quick-adjust on friendship + item */
@@ -1531,6 +1679,118 @@ static int gfx_pick_species(int current) {
         if (bt & PAD_BUTTON_DOWN) sel = (sel < 386) ? sel + 1 : 1;
         if (bt & PAD_TRIGGER_L)   sel = (sel > per_page) ? sel - per_page : 1;
         if (bt & PAD_TRIGGER_R)   sel = (sel + per_page <= 386) ? sel + per_page : 386;
+    }
+}
+
+/* On-screen keyboard for nickname / OT editing. 6 rows x 10 columns,
+ * with 3 layouts (uppercase / lowercase / digits+punct) cycled via Y.
+ *
+ *   D-Pad: move cursor on the grid
+ *   A:     append the highlighted character
+ *   L/R:   delete last char (L) or insert space (R)
+ *   X:     cycle layout (A-Z / a-z / 0-9 + .-!?)
+ *   START: confirm
+ *   B:     cancel
+ *
+ * `out_ascii` is a caller-owned buffer of length `max_chars + 1`.
+ * Returns true on confirm, false on cancel. The current value is
+ * shown as a preview; the user can backspace it to start fresh. */
+static bool gfx_text_input(const char *title, char *out_ascii,
+                           int max_chars, const char *initial) {
+    static const char *layouts[3] = {
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ      ",
+        "abcdefghijklmnopqrstuvwxyz      ",
+        "0123456789.-!?                  ",
+    };
+    int layout = 0;
+    int cur_x = 0, cur_y = 0;
+
+    /* Seed buffer with initial (truncated to max_chars). */
+    char buf[64];
+    int n = 0;
+    if (initial) {
+        while (initial[n] && n < max_chars && n < (int)sizeof buf - 1) {
+            buf[n] = initial[n];
+            n++;
+        }
+    }
+    buf[n] = 0;
+
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar(title);
+
+        /* Current value display */
+        gfx_draw_panel(60, 70, 520, 80, "NAME");
+        char line[80];
+        snprintf(line, sizeof line, "%-*s", max_chars,
+                 n > 0 ? buf : "(empty)");
+        pb_gfx_text_scale(80, 100, PB_GFX_COLOR_TEXT_ACCENT, 2, line);
+        snprintf(line, sizeof line, "%d / %d chars", n, max_chars);
+        pb_gfx_text(80, 130, PB_GFX_COLOR_TEXT_DIM, line);
+
+        /* Keyboard grid (4 rows x 8 cols max for a layout of 32 chars) */
+        gfx_draw_panel(60, 170, 520, 220, "KEYBOARD");
+        const char *L = layouts[layout];
+        int cols = 8, rows = 4;
+        int cell = 50;
+        int gx = 80, gy = 200;
+        for (int row = 0; row < rows; row++) {
+            for (int col = 0; col < cols; col++) {
+                int idx = row * cols + col;
+                char ch = L[idx];
+                if (ch == 0) break;
+                int x = gx + col * cell;
+                int y = gy + row * 42;
+                bool is_sel = (row == cur_y && col == cur_x);
+                if (is_sel) {
+                    pb_gfx_rounded_panel(x - 6, y - 8, cell - 4, 32, 4,
+                                         PB_GFX_COLOR_PANEL_ACCENT, 230);
+                }
+                char one[2] = { ch == ' ' ? '_' : ch, 0 };
+                pb_gfx_text_scale(x, y, is_sel
+                                  ? PB_GFX_COLOR_TEXT
+                                  : PB_GFX_COLOR_TEXT, 2, one);
+            }
+        }
+        /* Layout indicator */
+        const char *layout_label =
+            layout == 0 ? "Layout: A-Z" :
+            layout == 1 ? "Layout: a-z" :
+                          "Layout: 0-9 .-!?";
+        pb_gfx_text(80, 400, PB_GFX_COLOR_TEXT_DIM, layout_label);
+
+        gfx_draw_hint_bar("DPad: cursor  A: add  L: backspace  R: space  X: layout  START: ok  B: cancel");
+        pb_gfx_flip();
+
+        uint16_t bt = pb_gfx_wait_button();
+        if (bt & PAD_BUTTON_B) return false;
+        if (bt & PAD_BUTTON_START) {
+            out_ascii[0] = 0;
+            for (int i = 0; i < n; i++) out_ascii[i] = buf[i];
+            out_ascii[n] = 0;
+            return true;
+        }
+        if (bt & PAD_BUTTON_X) {
+            layout = (layout + 1) % 3;
+        }
+        if (bt & PAD_BUTTON_UP)    cur_y = (cur_y + 3) % 4;
+        if (bt & PAD_BUTTON_DOWN)  cur_y = (cur_y + 1) % 4;
+        if (bt & PAD_BUTTON_LEFT)  cur_x = (cur_x + 7) % 8;
+        if (bt & PAD_BUTTON_RIGHT) cur_x = (cur_x + 1) % 8;
+        if (bt & PAD_TRIGGER_L) {
+            if (n > 0) { n--; buf[n] = 0; }
+        }
+        if (bt & PAD_TRIGGER_R) {
+            if (n < max_chars) { buf[n++] = ' '; buf[n] = 0; }
+        }
+        if (bt & PAD_BUTTON_A) {
+            char ch = layouts[layout][cur_y * 8 + cur_x];
+            if (ch && ch != ' ' && n < max_chars) {
+                buf[n++] = ch;
+                buf[n] = 0;
+            }
+        }
     }
 }
 

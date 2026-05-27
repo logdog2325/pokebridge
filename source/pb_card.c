@@ -2,12 +2,23 @@
 #include "pb_audio.h"
 #include <ogc/card.h>
 #include <ogc/exi.h>
+#include <ogc/irq.h>
 #include <ogc/system.h>
 #include <ogc/video.h>
+#include <sdcard/card_cmn.h> /* MAX_DRIVE -- must precede card_io.h */
+#include <sdcard/card_io.h>  /* sdgecko_doUnmount */
 #include <fat.h>
 #include <malloc.h>
 #include <stdbool.h>
 #include <string.h>
+
+/* IRQ_EXI0_EXI mask bit (PPC bit-numbering, MSB=0). libogc's
+ * __exi_setinterrupts(EXI_CHANNEL_2) masks this on every chn-2 unlock
+ * and only unmasks again if a debugger is attached -- which kills the
+ * second CARD_Mount because libcard's state machine waits on this IRQ.
+ * The right fix is to manually re-unmask before each memcard op. */
+extern void __UnmaskIrq(u32 nMask);
+#define PB_IM_EXI0_EXI (1u << (31 - IRQ_EXI0_EXI))
 
 /* Cold-boot CARD_Mount hang fix (the GCMM-vs-PokeBridge difference):
  *
@@ -32,29 +43,58 @@ extern bool pb_sd_available;
 static bool s_fat_was_unmounted = false;
 
 static void pb_fat_release_for_card(void) {
-    /* 1. Tear down the FAT layer. */
+    /* The actual mechanic of why first-scan-works / second-scan-freezes
+     * was deeper than libfat just holding a lock. Diagnosed via libogc
+     * source dive:
+     *
+     *   1. "sd" volume maps to __io_gcsd2 which is SD2SP2 on EXI
+     *      channel 2 (NOT channel 0/1).
+     *   2. libogc's __exi_setinterrupts(EXI_CHANNEL_2) MASKS the
+     *      channel 0 EXI IRQ on every chn-2 unlock, and only re-
+     *      unmasks if a debugger is attached.
+     *   3. CARD_Mount's state machine sleeps on the channel 0 EXI IRQ
+     *      via LWP_ThreadSleep -> never wakes -> freezes.
+     *
+     * The proper sequence is therefore:
+     *   - fatUnmount the FAT layer
+     *   - sdgecko_doUnmount each drive so libfat's disc backend
+     *     actually releases its state (fatUnmount alone doesn't)
+     *   - Drain EXI locks on all THREE channels (0, 1, AND 2 -- we
+     *     used to skip 2)
+     *   - Re-unmask IRQ_EXI0_EXI which the chn-2 unlock masked
+     *   - EXI_ProbeReset for chn-0/1 ID lookups
+     *   - Brief settle
+     */
     if (pb_sd_available && !s_fat_was_unmounted) {
         fatUnmount("sd");
         s_fat_was_unmounted = true;
     }
 
-    /* 2. Drain any EXI locks libfat's disc backend may have left.
-     *    EXI_Unlock returns 1 while there are queued waiters / held
-     *    locks on the channel; loop until 0. */
-    for (int chn = 0; chn < 2; chn++) {
+    /* Tell each sdgecko disc backend to drop its internal state.
+     * drv_no 0/1 are slot A/B SD-Gecko, drv_no 2 is SD2SP2.
+     * Call all three -- no-ops for uninitialized drives. */
+    sdgecko_doUnmount(0);
+    sdgecko_doUnmount(1);
+    sdgecko_doUnmount(2);
+
+    /* Drain EXI lock waiters on every channel. */
+    for (int chn = 0; chn < 3; chn++) {
         int drain = 0;
         while (EXI_Unlock(chn) == 1 && drain++ < 16) { /* drain */ }
     }
 
-    /* 3. Detach the SD device from each channel. This is what
-     *    __exi_init does at libogc startup, but it never runs again
-     *    after fatInitDefault has attached __io_gcsda. */
-    EXI_Detach(EXI_CHANNEL_0);
-    EXI_Detach(EXI_CHANNEL_1);
+    /* THE KEY FIX: re-unmask IRQ_EXI0_EXI. Without this, CARD_Mount
+     * blocks forever because the IRQ that was supposed to wake its
+     * LWP wait queue is masked. */
+    __UnmaskIrq(PB_IM_EXI0_EXI);
 
-    /* 4. Settle delay -- EXI debounce is ~30us per __exi_probe; give
-     *    the bus ~500ms to come back to idle before CARD_Mount tries. */
-    for (int i = 0; i < 30; i++) VIDEO_WaitVSync();
+    /* Reset EXI probe state. */
+    EXI_ProbeReset();
+
+    /* Brief settle. 2 vsyncs is enough now that we're cleaning up
+     * properly -- the old 30-vsync wait was masking incomplete cleanup. */
+    VIDEO_WaitVSync();
+    VIDEO_WaitVSync();
 }
 
 static void pb_fat_reacquire_after_card(void) {

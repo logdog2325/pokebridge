@@ -138,6 +138,11 @@ void pb_xk3_create_default(uint8_t raw_out[196], uint16_t species_natdex,
  * for 1..251; uses Table3NationalToInternal offsets for 252+. */
 uint16_t pb_natdex_to_internal3(uint16_t natdex);
 
+/* Set the nickname on an XK3 record from an ASCII string. Updates
+ * both the "display" copy at 0x4E and the "data" copy at 0x64.
+ * Callers should re-run pb_xd_finalize_slot before writing back. */
+void pb_xk3_set_nickname(uint8_t *raw196, const char *ascii);
+
 /* Box geometry: 30 mons per box, 8 boxes total in XD. */
 #define PB_XD_BOX_COUNT       8
 #define PB_XD_BOX_SIZE        30

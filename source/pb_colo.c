@@ -228,6 +228,15 @@ void pb_ck3_create_default(uint8_t r[312], uint16_t species_natdex,
     /* 0xDC Purification gauge = 0 (irrelevant when not shadow). */
 }
 
+/* Write an ASCII nickname to a CK3 record. Colo stores the nickname
+ * twice -- "display" at 0x2E and "data" at 0x44, both 22-byte UTF-16
+ * BE fields. */
+void pb_ck3_set_nickname(uint8_t *raw312, const char *ascii) {
+    if (!raw312 || !ascii) return;
+    enc_colo_name(raw312 + 0x2E, ascii);
+    enc_colo_name(raw312 + 0x44, ascii);
+}
+
 uint32_t pb_colo_box_slot_offset(const pb_colo_save_t *cs, int box_index, int slot) {
     if (!cs || box_index < 0 || box_index >= PB_COLO_BOX_COUNT) return 0;
     if (slot < 0 || slot >= PB_COLO_BOX_SIZE) return 0;

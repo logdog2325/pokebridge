@@ -369,6 +369,15 @@ void pb_xk3_create_default(uint8_t r[196], uint16_t species_natdex,
     /* ShadowID at 0xBA = 0 (not shadow). */
 }
 
+/* Write an ASCII nickname to an XK3 record. XD stores the nickname
+ * twice -- a "display" copy at 0x4E and a "data" copy at 0x64, both
+ * 22-byte UTF-16 BE fields (10 chars + terminator). Update both. */
+void pb_xk3_set_nickname(uint8_t *raw196, const char *ascii) {
+    if (!raw196 || !ascii) return;
+    enc_gc_name(raw196 + 0x4E, ascii);
+    enc_gc_name(raw196 + 0x64, ascii);
+}
+
 bool pb_xd_write_file(pb_xd_save_t *xs, const char *path) {
     if (!xs || !path) return false;
     pb_xd_finalize_slot(xs);

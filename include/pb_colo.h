@@ -113,6 +113,10 @@ void pb_ck3_create_default(uint8_t raw_out[312], uint16_t species_natdex,
                             const char *trainer_name_gen3,
                             uint16_t tid, uint16_t sid);
 
+/* Set the nickname on a CK3 record from an ASCII string. Updates
+ * both the "display" copy at 0x2E and the "data" copy at 0x44. */
+void pb_ck3_set_nickname(uint8_t *raw312, const char *ascii);
+
 /* After in-memory edits, recompute checksums and re-encrypt the slot. */
 void pb_colo_finalize_slot(pb_colo_save_t *cs);
 
