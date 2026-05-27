@@ -1,4 +1,5 @@
 #include "pb_card.h"
+#include "pb_audio.h"
 #include <ogc/card.h>
 #include <ogc/system.h>
 #include <malloc.h>
@@ -79,10 +80,15 @@ static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count
 }
 
 int pb_card_scan(pb_card_entry_t *out, int max) {
+    /* Pause libasnd's ~1 kHz DSP IRQ for the duration of the scan --
+     * otherwise the EXI completion interrupts libcard waits on can be
+     * starved and CARD_Mount deadlocks. */
+    pb_audio_suspend();
     ensure_inited();
     int total = 0;
     total += scan_slot(CARD_SLOTA, out, max, total);
     total += scan_slot(CARD_SLOTB, out, max, total);
+    pb_audio_resume();
     return total;
 }
 
@@ -99,8 +105,8 @@ const char *pb_card_err_str(pb_card_err_t e) {
     return "?";
 }
 
-size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
-                         size_t max_bytes, pb_card_read_status_t *status) {
+static size_t do_card_read(const pb_card_entry_t *entry, uint8_t *out_buf,
+                           size_t max_bytes, pb_card_read_status_t *status) {
     pb_card_read_status_t local = {0};
     if (!status) status = &local;
     status->stage = PB_CARD_OK;
@@ -184,4 +190,110 @@ size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
     free(scratch);
     status->bytes_read = aligned;
     return aligned;
+}
+
+static size_t do_card_write(const pb_card_entry_t *entry, const uint8_t *buf,
+                            size_t len, pb_card_read_status_t *status) {
+    pb_card_read_status_t local = {0};
+    if (!status) status = &local;
+    status->stage = PB_CARD_OK;
+    status->libogc_rc = 0;
+    status->cf_len = 0;
+    status->bytes_read = 0;
+
+    if (!entry || !buf || len == 0) {
+        status->stage = PB_CARD_ERR_BAD_ARGS;
+        return 0;
+    }
+    ensure_inited();
+
+    int rc = CARD_Mount(entry->slot, s_workarea, NULL);
+    if (rc < 0) {
+        status->stage = PB_CARD_ERR_MOUNT;
+        status->libogc_rc = rc;
+        return 0;
+    }
+
+    /* CARD_Write requires sector-size alignment, not the 512 used by
+     * CARD_Read. Sector is 0x2000 on standard cards; query to be sure. */
+    uint32_t sector_size = 0x2000;
+    CARD_GetSectorSize(entry->slot, &sector_size);
+    if (sector_size == 0) sector_size = 0x2000;
+
+    if ((len % sector_size) != 0) {
+        /* Caller must pre-pad. We refuse rather than silently truncate. */
+        status->stage = PB_CARD_ERR_BAD_ARGS;
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+
+    CARD_SetGamecode((const char *)entry->gamecode);
+    CARD_SetCompany((const char *)entry->company);
+
+    card_file cf;
+    rc = CARD_Open(entry->slot, (char *)entry->filename, &cf);
+    if (rc < 0) {
+        status->stage = PB_CARD_ERR_OPEN;
+        status->libogc_rc = rc;
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+    status->cf_len = (uint32_t)cf.len;
+
+    /* Refuse to overwrite if buffer length doesn't match the file's
+     * stored length -- CARD_Write doesn't extend files and writing
+     * less would leave garbage in the trailing sectors. */
+    if (len != (size_t)cf.len) {
+        status->stage = PB_CARD_ERR_BAD_ARGS;
+        CARD_Close(&cf);
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+
+    /* CARD_Write requires the buffer to be 32-byte aligned (DMA
+     * constraint). Copy into an aligned scratch buffer. */
+    uint8_t *scratch = memalign(32, len);
+    if (!scratch) {
+        status->stage = PB_CARD_ERR_ALLOC;
+        CARD_Close(&cf);
+        CARD_Unmount(entry->slot);
+        return 0;
+    }
+    memcpy(scratch, buf, len);
+
+    size_t written = 0;
+    for (uint32_t off = 0; off < len; off += sector_size) {
+        rc = CARD_Write(&cf, scratch + off, sector_size, off);
+        if (rc < 0) {
+            status->stage = PB_CARD_ERR_READ; /* reuse READ stage for "i/o failed" */
+            status->libogc_rc = rc;
+            break;
+        }
+        written += sector_size;
+    }
+
+    CARD_Close(&cf);
+    CARD_Unmount(entry->slot);
+    free(scratch);
+
+    status->bytes_read = written;
+    return written;
+}
+
+/* Public wrappers: bracket each libcard call with pb_audio_suspend so
+ * the EXI completion IRQs aren't starved by libasnd's DSP IRQ. */
+size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
+                         size_t max_bytes, pb_card_read_status_t *status) {
+    pb_audio_suspend();
+    size_t r = do_card_read(entry, out_buf, max_bytes, status);
+    pb_audio_resume();
+    return r;
+}
+
+size_t pb_card_write_file(const pb_card_entry_t *entry, const uint8_t *buf,
+                          size_t len, pb_card_read_status_t *status) {
+    pb_audio_suspend();
+    size_t r = do_card_write(entry, buf, len, status);
+    pb_audio_resume();
+    return r;
 }

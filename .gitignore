@@ -22,6 +22,11 @@ data/*.sav
 data/*.gci
 data/*.gcs
 
+# Personal background music -- bring your own WAV via
+# `python3 tools/embed_audio.py title path/to/song.wav`.
+include/embedded_title_audio.h
+data/*.wav
+
 # Vendor reference checkouts (cloned by scripts/setup_assets.sh)
 vendor/PKHeX/
 vendor/pokeemerald-expansion/

@@ -156,6 +156,11 @@ void pb_colo_finalize_slot(pb_colo_save_t *cs) {
     colo_encrypt(slot);
 }
 
+void pb_colo_redecrypt_slot(pb_colo_save_t *cs) {
+    if (!cs || !cs->slot) return;
+    colo_decrypt(cs->slot);
+}
+
 bool pb_colo_write_file(pb_colo_save_t *cs, const char *path) {
     if (!cs || !path) return false;
     pb_colo_finalize_slot(cs);

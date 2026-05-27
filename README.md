@@ -114,6 +114,22 @@ Each command writes `include/embedded_<kind>_save.h` which the build picks up au
 
 **Note:** the `embedded_*save.h` files are gitignored — don't commit them. They contain user save data which is technically copyrighted.
 
+## Optional: embed background music
+
+A WAV dropped into `data/` and embedded via `embed_audio.py` will loop in the background while the app runs (uses libaesnd, gapless via `AESND_SetVoiceLoop`).
+
+```bash
+python3 tools/embed_audio.py title data/your_song.wav
+make
+```
+
+Requirements:
+- 16-bit PCM WAV (mono preferred, smaller .dol; stereo works too — change the format constant in `pb_audio.c`)
+- The tool byte-swaps to BE at embed time (GameCube DSP is BE-native)
+- Anything up to a few MB is fine — bigger samples make the `.dol` bigger, that's all
+
+`include/embedded_title_audio.h` is gitignored. Without it, `setup_assets.sh` writes a silent stub and the app boots without music.
+
 ## How it works
 
 PokéBridge is several modular pieces:

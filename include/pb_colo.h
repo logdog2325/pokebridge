@@ -107,6 +107,11 @@ void pb_ck3_apply_pkm_edits(const pb_pkm_t *p, uint8_t *raw312);
 /* After in-memory edits, recompute checksums and re-encrypt the slot. */
 void pb_colo_finalize_slot(pb_colo_save_t *cs);
 
+/* Inverse of finalize: decrypt the slot in place. Call after writing
+ * the encrypted bytes somewhere (memcard / SD) so further in-memory
+ * edits operate on plaintext again. */
+void pb_colo_redecrypt_slot(pb_colo_save_t *cs);
+
 /* Write the full Colosseum save (after finalize) back to a path. */
 bool pb_colo_write_file(pb_colo_save_t *cs, const char *path);
 

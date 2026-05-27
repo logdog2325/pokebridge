@@ -75,6 +75,15 @@ typedef struct {
 size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
                           size_t max_bytes, pb_card_read_status_t *status);
 
+/* Write the bytes in `buf` back into the file identified by `entry`,
+ * overwriting in place. `len` MUST be a multiple of the card's sector
+ * size (8192 bytes on standard memcards) and must equal the file's
+ * stored length -- libogc CARD_Write does not extend files. Returns
+ * the number of bytes written, or 0 on failure. If `status` is
+ * non-NULL it gets the same diagnostic stage/code as on read. */
+size_t pb_card_write_file(const pb_card_entry_t *entry, const uint8_t *buf,
+                           size_t len, pb_card_read_status_t *status);
+
 const char *pb_card_err_str(pb_card_err_t e);
 
 const char *pb_card_game_name(pb_card_game_t g);

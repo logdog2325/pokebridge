@@ -8,6 +8,7 @@
 #include "pb_xd.h"
 #include "pb_colo.h"
 #include "pb_card.h"
+#include "pb_audio.h"
 #include "pb_gfx.h"
 #include "endian_le.h"
 #include <gccore.h>
@@ -429,6 +430,20 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs);
 static void gfx_colo_party_screen(pb_colo_save_t *cs);
 static void gfx_colo_box_screen(pb_colo_save_t *cs);
 
+/* Save-source tracking: when a save was loaded from a memory card we
+ * stash the entry so a write-back option can call pb_card_write_file
+ * with the right slot/filename. NULL = SD or embedded demo (no
+ * memcard write target). Set by the loader call site, read by the
+ * party screens to decide whether to offer "Save to memory card". */
+static const pb_card_entry_t *g_xd_card_src   = NULL;
+static const pb_card_entry_t *g_colo_card_src = NULL;
+
+/* Prompt + write XD save back to the source memory card. Encrypts
+ * in-place, writes via CARD_Write, then decrypts again so further
+ * edits stay valid. Shows result on screen. */
+static void gfx_save_xd_to_memcard(pb_xd_save_t *xs, const pb_card_entry_t *entry);
+static void gfx_save_colo_to_memcard(pb_colo_save_t *cs, const pb_card_entry_t *entry);
+
 /* Detect a save file's game by header / size. */
 static pb_boxart_t detect_boxart_from_save(const pb_save_t *s) {
     switch (s->game) {
@@ -509,10 +524,187 @@ static void gfx_draw_panel(int x, int y, int w, int h, const char *title) {
     }
 }
 
+/* Shared confirm + result UI for memcard save-back. Both XD and Colo
+ * variants below funnel through this so they look identical. */
+static bool gfx_confirm_memcard_save(const char *game_label, const pb_card_entry_t *entry) {
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Save to memory card");
+        gfx_draw_panel(60, 110, 520, 280, NULL);
+        pb_gfx_text(90, 140, PB_GFX_COLOR_TEXT_ACCENT, "Save edits back to the card?");
+        char line[96];
+        snprintf(line, sizeof line, "Game:     %s", game_label);
+        pb_gfx_text(90, 180, PB_GFX_COLOR_TEXT, line);
+        snprintf(line, sizeof line, "Slot:     %c", entry->slot == 0 ? 'A' : 'B');
+        pb_gfx_text(90, 200, PB_GFX_COLOR_TEXT, line);
+        snprintf(line, sizeof line, "Filename: %s", entry->filename);
+        pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT, line);
+        snprintf(line, sizeof line, "Size:     %u bytes", (unsigned)entry->length);
+        pb_gfx_text(90, 240, PB_GFX_COLOR_TEXT_DIM, line);
+
+        pb_gfx_text(90, 280, PB_GFX_COLOR_PANEL_ACCENT,
+                    "This overwrites the existing save on the card.");
+        pb_gfx_text(90, 298, PB_GFX_COLOR_TEXT_DIM,
+                    "Do NOT remove the card while the write is in progress.");
+        pb_gfx_text(90, 316, PB_GFX_COLOR_TEXT_DIM,
+                    "If you have any second thoughts, back out and");
+        pb_gfx_text(90, 332, PB_GFX_COLOR_TEXT_DIM,
+                    "manually back the file up with GCMM first.");
+
+        gfx_draw_hint_bar("A: confirm save   B: cancel");
+        pb_gfx_flip();
+        uint16_t b = pb_gfx_wait_button();
+        if (b & PAD_BUTTON_A) return true;
+        if (b & PAD_BUTTON_B) return false;
+    }
+}
+
+static void gfx_show_memcard_save_result(size_t written, const pb_card_read_status_t *rs) {
+    pb_gfx_clear();
+    gfx_draw_title_bar(written > 0 ? "Save complete" : "Save failed");
+    gfx_draw_panel(60, 110, 520, 260, NULL);
+    if (written > 0) {
+        pb_gfx_text(90, 150, PB_GFX_COLOR_TEXT_ACCENT, "Save written back to the card.");
+        char line[80];
+        snprintf(line, sizeof line, "Bytes written: %u", (unsigned)written);
+        pb_gfx_text(90, 180, PB_GFX_COLOR_TEXT, line);
+        pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT_DIM,
+                    "Boot the game on real hardware to verify");
+        pb_gfx_text(90, 236, PB_GFX_COLOR_TEXT_DIM,
+                    "that the changes took.");
+    } else {
+        pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT, "Card write failed.");
+        char line[96];
+        snprintf(line, sizeof line, "Stage: %s", pb_card_err_str(rs->stage));
+        pb_gfx_text(90, 180, PB_GFX_COLOR_TEXT, line);
+        snprintf(line, sizeof line, "libogc rc: %d", rs->libogc_rc);
+        pb_gfx_text(90, 200, PB_GFX_COLOR_TEXT, line);
+        snprintf(line, sizeof line, "File length reported: %u", (unsigned)rs->cf_len);
+        pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT, line);
+        pb_gfx_text(90, 260, PB_GFX_COLOR_TEXT_DIM,
+                    "In-memory edits are still intact -- you can");
+        pb_gfx_text(90, 276, PB_GFX_COLOR_TEXT_DIM,
+                    "try the save again with the card reseated.");
+    }
+    gfx_draw_hint_bar("Press any button");
+    pb_gfx_flip();
+    pb_gfx_wait_button();
+}
+
+/* Self-verify: after finalize encrypts the slot, run pb_xd_load on a
+ * temporary copy of the body to confirm our re-parse can decrypt and
+ * extract a valid trainer offset. Catches algorithm bugs (like the
+ * body-checksum reversal that corrupted a tester's save) BEFORE we
+ * write the bytes to a real card. Returns true if the round-trip
+ * decrypts cleanly. */
+static bool verify_xd_roundtrip(const pb_xd_save_t *xs) {
+    static pb_xd_save_t check;
+    if (!pb_xd_load(&check, xs->body, PB_XD_SAVE_SIZE)) return false;
+    if (check.trainer_offset == 0)         return false;
+    if (check.party_offset   == 0)         return false;
+    if (check.save_count != xs->save_count) return false; /* should match */
+    return true;
+}
+
+static void gfx_save_xd_to_memcard(pb_xd_save_t *xs, const pb_card_entry_t *entry) {
+    if (!xs || !entry) return;
+    if (!gfx_confirm_memcard_save("Pokemon XD: Gale of Darkness", entry)) return;
+
+    /* Encrypt + recompute checksums. After this xs->body is the exact
+     * bytes we want on the card. */
+    pb_xd_finalize_slot(xs);
+
+    /* Defense-in-depth: try to re-parse our own output. If parsing
+     * fails, the on-card save would be junk -- abort before writing. */
+    bool verified = verify_xd_roundtrip(xs);
+    /* Whether verify passes or not, we must re-decrypt our copy so
+     * the user can keep browsing. */
+    pb_xd_redecrypt_slot(xs);
+
+    if (!verified) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Self-verify failed");
+        gfx_draw_panel(60, 100, 520, 300, NULL);
+        pb_gfx_text(90, 130, PB_GFX_COLOR_PANEL_ACCENT,
+                    "Refused to write -- self-verify failed.");
+        pb_gfx_text(90, 160, PB_GFX_COLOR_TEXT,
+                    "After re-encrypting + recomputing checksums,");
+        pb_gfx_text(90, 178, PB_GFX_COLOR_TEXT,
+                    "PokeBridge could not re-parse its own output.");
+        pb_gfx_text(90, 196, PB_GFX_COLOR_TEXT,
+                    "The save would have been rejected by XD.");
+        pb_gfx_text(90, 230, PB_GFX_COLOR_TEXT_DIM,
+                    "This means a code bug, not a card issue.");
+        pb_gfx_text(90, 248, PB_GFX_COLOR_TEXT_DIM,
+                    "Existing card data is untouched.");
+        gfx_draw_hint_bar("Press any button");
+        pb_gfx_flip();
+        pb_gfx_wait_button();
+        return;
+    }
+
+    /* Re-encrypt one more time so the bytes about to be written are
+     * the encrypted form (verify_xd_roundtrip left them encrypted, but
+     * the redecrypt above just decrypted them again for browsing). */
+    pb_xd_finalize_slot(xs);
+
+    pb_card_read_status_t rs;
+    size_t written = pb_card_write_file(entry, xs->body, PB_XD_SAVE_SIZE, &rs);
+
+    /* Always re-decrypt so the in-memory state matches what the user
+     * sees on the party screen (and so further edits work). */
+    pb_xd_redecrypt_slot(xs);
+
+    gfx_show_memcard_save_result(written, &rs);
+}
+
+static bool verify_colo_roundtrip(const pb_colo_save_t *cs) {
+    static pb_colo_save_t check;
+    if (!pb_colo_load(&check, cs->body, PB_COLO_SAVE_SIZE)) return false;
+    if (check.save_count != cs->save_count) return false;
+    return true;
+}
+
+static void gfx_save_colo_to_memcard(pb_colo_save_t *cs, const pb_card_entry_t *entry) {
+    if (!cs || !entry) return;
+    if (!gfx_confirm_memcard_save("Pokemon Colosseum", entry)) return;
+
+    pb_colo_finalize_slot(cs);
+
+    bool verified = verify_colo_roundtrip(cs);
+    pb_colo_redecrypt_slot(cs);
+
+    if (!verified) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Self-verify failed");
+        gfx_draw_panel(60, 100, 520, 300, NULL);
+        pb_gfx_text(90, 130, PB_GFX_COLOR_PANEL_ACCENT,
+                    "Refused to write -- self-verify failed.");
+        pb_gfx_text(90, 160, PB_GFX_COLOR_TEXT,
+                    "Colosseum re-encrypt produced a save we");
+        pb_gfx_text(90, 178, PB_GFX_COLOR_TEXT,
+                    "could not re-parse. Card data untouched.");
+        gfx_draw_hint_bar("Press any button");
+        pb_gfx_flip();
+        pb_gfx_wait_button();
+        return;
+    }
+
+    pb_colo_finalize_slot(cs);
+
+    pb_card_read_status_t rs;
+    size_t written = pb_card_write_file(entry, cs->body, PB_COLO_SAVE_SIZE, &rs);
+
+    pb_colo_redecrypt_slot(cs);
+
+    gfx_show_memcard_save_result(written, &rs);
+}
+
 /* The big graphics-mode XD party viewer. Renders Pokemon Box-inspired layout
  * with a title bar, 6 sprite slots at the top, and a detail panel below. */
 static void gfx_xd_party_screen(pb_xd_save_t *xs) {
     int sel = 0;
+    bool edited = false;
     for (;;) {
         pb_gfx_clear();
 
@@ -586,7 +778,13 @@ static void gfx_xd_party_screen(pb_xd_save_t *xs) {
                         "(HP / Atk / Def / Spe / SpA / SpD)");
         }
 
-        gfx_draw_hint_bar("D-Pad / L-R: select   B: back   (gfx demo)");
+        /* Hint bar: show save option only when the save came from a
+         * memory card and at least one edit was made this session. */
+        if (edited && g_xd_card_src) {
+            gfx_draw_hint_bar("D-Pad: select   A: view/edit   START: save to memcard   B: back");
+        } else {
+            gfx_draw_hint_bar("D-Pad: select   A: view/edit   B: back");
+        }
 
         pb_gfx_flip();
         uint16_t b = pb_gfx_wait_button();
@@ -600,7 +798,13 @@ static void gfx_xd_party_screen(pb_xd_save_t *xs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = xs->slot + xs->party_offset + sel * PB_XD_PKM_SIZE;
             pb_pkm_t p; pb_xk3_to_pkm(&p, raw);
-            if (!p.is_empty) gfx_show_pkm_detail(&p, raw, PB_FMT_XK3);
+            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
+                edited = true;
+            }
+        }
+        if ((b & PAD_BUTTON_START) && edited && g_xd_card_src) {
+            gfx_save_xd_to_memcard(xs, g_xd_card_src);
+            edited = false; /* save consumed -- reset flag */
         }
     }
 }
@@ -1233,6 +1437,7 @@ static void gfx_pkm_box_screen(pb_save_t *s) {
 static void gfx_colo_party_screen(pb_colo_save_t *cs) {
     if (!cs) return;
     int sel = 0;
+    bool edited = false;
     for (;;) {
         pb_gfx_clear();
         char title[64];
@@ -1292,7 +1497,11 @@ static void gfx_colo_party_screen(pb_colo_save_t *cs) {
             pb_gfx_text(48, 410, PB_GFX_COLOR_TEXT_DIM,
                         "(HP / Atk / Def / Spe / SpA / SpD)");
         }
-        gfx_draw_hint_bar("D-Pad/L-R: select   A: open   B: back");
+        if (edited && g_colo_card_src) {
+            gfx_draw_hint_bar("D-Pad: select   A: view/edit   START: save to memcard   B: back");
+        } else {
+            gfx_draw_hint_bar("D-Pad/L-R: select   A: open   B: back");
+        }
         pb_gfx_flip();
 
         uint16_t b = pb_gfx_wait_button();
@@ -1304,7 +1513,13 @@ static void gfx_colo_party_screen(pb_colo_save_t *cs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = cs->slot + PB_COLO_PARTY_OFF + sel * PB_COLO_PKM_SIZE;
             pb_pkm_t p; pb_ck3_to_pkm(&p, raw);
-            if (!p.is_empty) gfx_show_pkm_detail(&p, raw, PB_FMT_CK3);
+            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
+                edited = true;
+            }
+        }
+        if ((b & PAD_BUTTON_START) && edited && g_colo_card_src) {
+            gfx_save_colo_to_memcard(cs, g_colo_card_src);
+            edited = false;
         }
     }
 }
@@ -1312,6 +1527,7 @@ static void gfx_colo_party_screen(pb_colo_save_t *cs) {
 static void gfx_colo_box_screen(pb_colo_save_t *cs) {
     if (!cs) return;
     int box = 0, sel = 0;
+    bool edited = false;
     for (;;) {
         pb_gfx_clear();
         char title[64];
@@ -1362,7 +1578,11 @@ static void gfx_colo_box_screen(pb_colo_save_t *cs) {
                      sp.is_shadow ? "  [SHADOW]" : "");
             pb_gfx_text(48, 408, PB_GFX_COLOR_TEXT, line);
         }
-        gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   B: back");
+        if (edited && g_colo_card_src) {
+            gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   START: save   B: back");
+        } else {
+            gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   B: back");
+        }
         pb_gfx_flip();
 
         uint16_t b = pb_gfx_wait_button();
@@ -1376,7 +1596,13 @@ static void gfx_colo_box_screen(pb_colo_save_t *cs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = cs->slot + pb_colo_box_slot_offset(cs, box, sel);
             pb_pkm_t p; pb_ck3_to_pkm(&p, raw);
-            if (!p.is_empty) gfx_show_pkm_detail(&p, raw, PB_FMT_CK3);
+            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
+                edited = true;
+            }
+        }
+        if ((b & PAD_BUTTON_START) && edited && g_colo_card_src) {
+            gfx_save_colo_to_memcard(cs, g_colo_card_src);
+            edited = false;
         }
     }
 }
@@ -1386,6 +1612,7 @@ static void gfx_colo_box_screen(pb_colo_save_t *cs) {
 static void gfx_xd_box_screen(pb_xd_save_t *xs) {
     if (!xs || !xs->box_offset) return;
     int box = 0, sel = 0;
+    bool edited = false;
     for (;;) {
         pb_gfx_clear();
         char title[64];
@@ -1449,7 +1676,11 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs) {
                      sp.iv[0], sp.iv[1], sp.iv[2], sp.iv[3], sp.iv[4], sp.iv[5]);
             pb_gfx_text(48, 424, PB_GFX_COLOR_TEXT_DIM, line2);
         }
-        gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   B: back");
+        if (edited && g_xd_card_src) {
+            gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   START: save   B: back");
+        } else {
+            gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   B: back");
+        }
         pb_gfx_flip();
 
         uint16_t b = pb_gfx_wait_button();
@@ -1463,7 +1694,13 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = xs->slot + pb_xd_box_slot_offset(xs, box, sel);
             pb_pkm_t p; pb_xk3_to_pkm(&p, raw);
-            if (!p.is_empty) gfx_show_pkm_detail(&p, raw, PB_FMT_XK3);
+            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
+                edited = true;
+            }
+        }
+        if ((b & PAD_BUTTON_START) && edited && g_xd_card_src) {
+            gfx_save_xd_to_memcard(xs, g_xd_card_src);
+            edited = false;
         }
     }
 }
@@ -1472,6 +1709,7 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs) {
 
 void pb_ui_run_graphics_app(void) {
     if (!pb_gfx_init()) return;
+    pb_audio_init();
     int sel = 0;
     static const char *items[] = {
         "Load FireRed save (demo)",
@@ -1531,11 +1769,17 @@ void pb_ui_run_graphics_app(void) {
             gfx_draw_panel(420, 180, 180, 240, NULL);
         }
 
-        gfx_draw_hint_bar("D-Pad: select   A (X-key): choose   START: exit");
+        gfx_draw_hint_bar("D-Pad: select   A: open   START: exit to Swiss / IPL");
         pb_gfx_flip();
 
         uint16_t b = pb_gfx_wait_button();
-        if (b & PAD_BUTTON_START) return;
+        /* START is a global "exit" shortcut from the main menu. Treat
+         * it as if the user navigated to the Exit item and pressed A
+         * (so the confirm screen runs and exit isn't accidental). */
+        if (b & PAD_BUTTON_START) {
+            sel = n - 1;
+            b   = PAD_BUTTON_A;  /* drop any nav bits to avoid moving off */
+        }
         if (b & (PAD_BUTTON_UP | PAD_TRIGGER_L))   sel = (sel + n - 1) % n;
         if (b & (PAD_BUTTON_DOWN | PAD_TRIGGER_R)) sel = (sel + 1) % n;
         if (b & PAD_BUTTON_A) {
@@ -2226,10 +2470,91 @@ void pb_ui_run_graphics_app(void) {
                             }
                             if (cards[csel].game == PB_CARD_GAME_XD) {
                                 static pb_xd_save_t xs;
-                                if (pb_xd_load(&xs, cardbuf, got)) gfx_xd_party_screen(&xs);
+                                if (pb_xd_load(&xs, cardbuf, got)) {
+                                    g_xd_card_src = &cards[csel];
+                                    /* Sub-menu: party / boxes / save / back. */
+                                    int sub_sel = 0;
+                                    static const char *subs[] = {
+                                        "Browse party", "Browse boxes",
+                                        "Save to memory card", "Back",
+                                    };
+                                    const int n_subs = 4;
+                                    for (;;) {
+                                        pb_gfx_clear();
+                                        gfx_draw_title_bar("Pokemon XD save (memcard)");
+                                        gfx_draw_panel(60, 80, 520, 110, "TRAINER");
+                                        char buf[80];
+                                        snprintf(buf, sizeof buf, "%s   ID %u   Saves %u",
+                                                 xs.trainer_name, xs.trainer_id, (unsigned)xs.save_count);
+                                        pb_gfx_text(80, 120, PB_GFX_COLOR_TEXT, buf);
+                                        snprintf(buf, sizeof buf, "Slot %c   %s",
+                                                 cards[csel].slot == 0 ? 'A' : 'B', cards[csel].filename);
+                                        pb_gfx_text(80, 142, PB_GFX_COLOR_TEXT_DIM, buf);
+                                        gfx_draw_panel(60, 210, 520, 200, NULL);
+                                        for (int i = 0; i < n_subs; i++) {
+                                            int yy = 240 + i * 32;
+                                            uint32_t col = (i == sub_sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+                                            if (i == sub_sel) pb_gfx_rounded_panel(75, yy - 6, 490, 24, 4, PB_GFX_COLOR_PANEL_LIGHT, 200);
+                                            pb_gfx_text(95, yy, col, subs[i]);
+                                        }
+                                        gfx_draw_hint_bar("DPad: select   A: open   B: back");
+                                        pb_gfx_flip();
+                                        uint16_t sb = pb_gfx_wait_button();
+                                        if (sb & PAD_BUTTON_B) break;
+                                        if (sb & PAD_BUTTON_UP)   sub_sel = (sub_sel + n_subs - 1) % n_subs;
+                                        if (sb & PAD_BUTTON_DOWN) sub_sel = (sub_sel + 1) % n_subs;
+                                        if (sb & PAD_BUTTON_A) {
+                                            if (sub_sel == 0)      gfx_xd_party_screen(&xs);
+                                            else if (sub_sel == 1) gfx_xd_box_screen(&xs);
+                                            else if (sub_sel == 2) gfx_save_xd_to_memcard(&xs, &cards[csel]);
+                                            else break;
+                                        }
+                                    }
+                                    g_xd_card_src = NULL;
+                                }
                             } else if (cards[csel].game == PB_CARD_GAME_COLOSSEUM) {
                                 static pb_colo_save_t cs;
-                                if (pb_colo_load(&cs, cardbuf, got)) gfx_colo_party_screen(&cs);
+                                if (pb_colo_load(&cs, cardbuf, got)) {
+                                    g_colo_card_src = &cards[csel];
+                                    int sub_sel = 0;
+                                    static const char *subs[] = {
+                                        "Browse party", "Browse boxes",
+                                        "Save to memory card", "Back",
+                                    };
+                                    const int n_subs = 4;
+                                    for (;;) {
+                                        pb_gfx_clear();
+                                        gfx_draw_title_bar("Pokemon Colosseum save (memcard)");
+                                        gfx_draw_panel(60, 80, 520, 110, "TRAINER");
+                                        char buf[80];
+                                        snprintf(buf, sizeof buf, "%s   ID %u   Saves %u",
+                                                 cs.trainer_name, cs.trainer_id, (unsigned)cs.save_count);
+                                        pb_gfx_text(80, 120, PB_GFX_COLOR_TEXT, buf);
+                                        snprintf(buf, sizeof buf, "Slot %c   %s",
+                                                 cards[csel].slot == 0 ? 'A' : 'B', cards[csel].filename);
+                                        pb_gfx_text(80, 142, PB_GFX_COLOR_TEXT_DIM, buf);
+                                        gfx_draw_panel(60, 210, 520, 200, NULL);
+                                        for (int i = 0; i < n_subs; i++) {
+                                            int yy = 240 + i * 32;
+                                            uint32_t col = (i == sub_sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+                                            if (i == sub_sel) pb_gfx_rounded_panel(75, yy - 6, 490, 24, 4, PB_GFX_COLOR_PANEL_LIGHT, 200);
+                                            pb_gfx_text(95, yy, col, subs[i]);
+                                        }
+                                        gfx_draw_hint_bar("DPad: select   A: open   B: back");
+                                        pb_gfx_flip();
+                                        uint16_t sb = pb_gfx_wait_button();
+                                        if (sb & PAD_BUTTON_B) break;
+                                        if (sb & PAD_BUTTON_UP)   sub_sel = (sub_sel + n_subs - 1) % n_subs;
+                                        if (sb & PAD_BUTTON_DOWN) sub_sel = (sub_sel + 1) % n_subs;
+                                        if (sb & PAD_BUTTON_A) {
+                                            if (sub_sel == 0)      gfx_colo_party_screen(&cs);
+                                            else if (sub_sel == 1) gfx_colo_box_screen(&cs);
+                                            else if (sub_sel == 2) gfx_save_colo_to_memcard(&cs, &cards[csel]);
+                                            else break;
+                                        }
+                                    }
+                                    g_colo_card_src = NULL;
+                                }
                             } else {
                                 /* Pokemon Box: no parser yet */
                                 pb_gfx_clear();
@@ -2350,7 +2675,46 @@ void pb_ui_run_graphics_app(void) {
                     }
                     break;
                 }
-                case 9: return;
+                case 9: {
+                    /* Confirm + show a brief "returning to loader" screen,
+                     * then drop back to main(). libogc will invoke the
+                     * Swiss reload stub at 0x80001800 if launched via
+                     * Swiss, returning to the Swiss menu; otherwise it
+                     * cold-resets to the GameCube IPL. */
+                    for (;;) {
+                        pb_gfx_clear();
+                        gfx_draw_title_bar("Exit PokeBridge");
+                        gfx_draw_panel(120, 140, 400, 240, NULL);
+                        pb_gfx_text(150, 180, PB_GFX_COLOR_TEXT_ACCENT,
+                                    "Return to Swiss / boot menu?");
+                        pb_gfx_text(150, 220, PB_GFX_COLOR_TEXT,
+                                    "If you launched from Swiss you'll go");
+                        pb_gfx_text(150, 238, PB_GFX_COLOR_TEXT,
+                                    "back to the Swiss file picker.");
+                        pb_gfx_text(150, 270, PB_GFX_COLOR_TEXT_DIM,
+                                    "Otherwise the console will return to");
+                        pb_gfx_text(150, 288, PB_GFX_COLOR_TEXT_DIM,
+                                    "the GameCube logo / IPL menu.");
+                        pb_gfx_text(150, 330, PB_GFX_COLOR_PANEL_ACCENT,
+                                    "Any unsaved edits will be lost.");
+                        gfx_draw_hint_bar("A: exit   B: cancel");
+                        pb_gfx_flip();
+                        uint16_t bb = pb_gfx_wait_button();
+                        if (bb & PAD_BUTTON_A) {
+                            pb_gfx_clear();
+                            gfx_draw_title_bar("Goodbye");
+                            gfx_draw_panel(120, 180, 400, 120, NULL);
+                            pb_gfx_text(150, 220, PB_GFX_COLOR_TEXT_ACCENT,
+                                        "Returning to loader...");
+                            pb_gfx_flip();
+                            VIDEO_WaitVSync();
+                            VIDEO_WaitVSync();
+                            return;
+                        }
+                        if (bb & PAD_BUTTON_B) break;
+                    }
+                    break;
+                }
             }
         }
     }

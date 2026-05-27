@@ -134,6 +134,11 @@ uint32_t pb_xd_box_slot_offset(const pb_xd_save_t *s, int box_index, int slot);
  * Mirrors PKHeX's XDCrypto.SetChecksums + EncryptSlot. */
 void pb_xd_finalize_slot(pb_xd_save_t *xs);
 
+/* Inverse of finalize: decrypt the slot in place. Call after writing
+ * the encrypted bytes somewhere (memcard / SD) so further in-memory
+ * edits operate on plaintext again. */
+void pb_xd_redecrypt_slot(pb_xd_save_t *xs);
+
 /* Write the full XD save (after finalize) back to a path. Returns true on
  * success. The file written is the raw 0x56000-byte XD body without the
  * Datel "DATELGC_SAVE" wrapper -- most tools accept this form. */

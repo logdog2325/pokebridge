@@ -63,23 +63,12 @@ bool pb_xd_load(pb_xd_save_t *out, const uint8_t *data, size_t len) {
     pb_genius_decrypt(out->slot + PB_XD_ENC_START,
                       PB_XD_ENC_END - PB_XD_ENC_START, keys);
 
-    /* PKHeX SAV3XD.InitializeData reads dynamic sub-offsets:
-     *   subOffsets[i] = (BE u16 at 0x40+4i) | ((BE u16 at 0x40+4i+2) << 16)
-     *   Trainer1 = subOffsets[1] + 0xA8
-     *   Party    = Trainer1 + 0x30
-     *
-     * The hardcoded constants in SAV3XD's blank constructor (Trainer1=0xCCD8
-     * etc.) are NOT correct for existing saves -- they're write-only defaults
-     * for new files. */
-    uint32_t sub1 = ((uint32_t)rd_u16be(out->slot + 0x40 + 4) << 16)
-                  | (uint32_t)rd_u16be(out->slot + 0x40 + 4 + 2);
-    /* Above matches PKHeX's read order: it does (low u16) | ((high u16) << 16),
-     * but the bytes at 0x40+4i are the HIGH word in BE save layouts. Try both
-     * interpretations -- we'll fall back if the first looks insane. */
-    if (sub1 > 0x28000) {
-        sub1 = (uint32_t)rd_u16be(out->slot + 0x40 + 4)
-             | ((uint32_t)rd_u16be(out->slot + 0x40 + 4 + 2) << 16);
-    }
+    /* PKHeX SAV3XD reads dynamic sub-offsets via:
+     *   subOffsets[i] = BE u16 at 0x40+4i | (BE u16 at 0x40+4i+2) << 16
+     * i.e. each u32 is stored as two BE u16 words, LOW word first.
+     * Trainer1 = subOffsets[1] + 0xA8. */
+    uint32_t sub1 = (uint32_t)rd_u16be(out->slot + 0x44)
+                  | ((uint32_t)rd_u16be(out->slot + 0x46) << 16);
     uint32_t trainer1 = sub1 + 0xA8;
     uint32_t party    = trainer1 + 0x30;
     if (trainer1 + 0x100 >= PB_XD_SLOT_SIZE || party + 6 * PB_XD_PKM_SIZE >= PB_XD_SLOT_SIZE) {
@@ -103,9 +92,9 @@ bool pb_xd_load(pb_xd_save_t *out, const uint8_t *data, size_t len) {
     out->party_offset = party;
     out->trainer_offset = trainer1;
 
-    /* Box offset: subOffsets[2] + 0xA8. Use the same low|high-shift convention. */
-    uint32_t sub2 = (uint32_t)rd_u16be(out->slot + 0x40 + 8)
-                  | ((uint32_t)rd_u16be(out->slot + 0x40 + 8 + 2) << 16);
+    /* Box offset: subOffsets[2] + 0xA8. Same encoding as subOffsets[1]. */
+    uint32_t sub2 = (uint32_t)rd_u16be(out->slot + 0x48)
+                  | ((uint32_t)rd_u16be(out->slot + 0x4A) << 16);
     if (sub2 + 0xA8 + PB_XD_BOX_COUNT * PB_XD_BOX_STRIDE < PB_XD_SLOT_SIZE) {
         out->box_offset = sub2 + 0xA8;
     } else {
@@ -255,10 +244,26 @@ static void set_checksums(uint8_t *slot, uint32_t sub_off0) {
         dt = end;
         checksums[i] = v;
     }
-    /* Write the 4 u32 checksums as 8 BE u16s at offset 0x10..0x20. */
+    /* PKHeX XDCrypto.SetChecksums splits each u32 into [hi, lo] u16 pairs,
+     * then writes the 8 resulting words to 0x10..0x20 IN REVERSE ORDER.
+     * Getting this wrong (writing forward) produces a body checksum the
+     * game refuses -- which is what corrupted the first real-hardware
+     * test save. Mirror PKHeX exactly.
+     *
+     *   newchks = [hi0, lo0, hi1, lo1, hi2, lo2, hi3, lo3]
+     *   for i in 0..8: data[0x10 + 2*i] = newchks[7 - i]   (BE u16 each)
+     *
+     * Net layout on disk:
+     *   0x10: lo3 0x12: hi3 0x14: lo2 0x16: hi2
+     *   0x18: lo1 0x1A: hi1 0x1C: lo0 0x1E: hi0
+     */
+    uint16_t newchks[8];
     for (int i = 0; i < 4; i++) {
-        wr_u16be_p(slot + 0x10 + i * 4 + 0, (uint16_t)(checksums[i] >> 16));
-        wr_u16be_p(slot + 0x10 + i * 4 + 2, (uint16_t)(checksums[i] & 0xFFFF));
+        newchks[i * 2]     = (uint16_t)(checksums[i] >> 16);
+        newchks[i * 2 + 1] = (uint16_t)(checksums[i] & 0xFFFF);
+    }
+    for (int i = 0; i < 8; i++) {
+        wr_u16be_p(slot + 0x10 + 2 * i, newchks[8 - 1 - i]);
     }
 }
 
@@ -273,6 +278,14 @@ void pb_xd_finalize_slot(pb_xd_save_t *xs) {
     uint16_t keys[4];
     pb_genius_read_keys(xs->slot + PB_XD_KEYS_OFFSET, keys);
     pb_genius_encrypt(xs->slot + PB_XD_ENC_START,
+                      PB_XD_ENC_END - PB_XD_ENC_START, keys);
+}
+
+void pb_xd_redecrypt_slot(pb_xd_save_t *xs) {
+    if (!xs || !xs->slot) return;
+    uint16_t keys[4];
+    pb_genius_read_keys(xs->slot + PB_XD_KEYS_OFFSET, keys);
+    pb_genius_decrypt(xs->slot + PB_XD_ENC_START,
                       PB_XD_ENC_END - PB_XD_ENC_START, keys);
 }
 
