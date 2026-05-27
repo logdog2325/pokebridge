@@ -1,21 +1,44 @@
 #include "pb_card.h"
 #include "pb_audio.h"
 #include <ogc/card.h>
+#include <ogc/exi.h>
 #include <ogc/system.h>
+#include <ogc/video.h>
 #include <malloc.h>
 #include <string.h>
 
 /* Workarea for card operations -- must be 32-byte aligned and at least
  * CARD_WORKAREA_SIZE bytes per active mount. We share one across both
  * slots since we mount-then-unmount per slot rather than holding both
- * simultaneously. */
+ * simultaneously. Statically allocated (BSS) -- heap or stack buffers
+ * can land in regions where Swiss leaves stale uncached state and
+ * silently fail EXI DMA. */
 static uint8_t s_workarea[CARD_WORKAREA_SIZE] __attribute__((aligned(32)));
-static bool s_card_inited = false;
 
-static void ensure_inited(void) {
-    if (s_card_inited) return;
-    CARD_Init("PBRG", "01");  /* arbitrary 4-char gamecode + 2-char maker */
-    s_card_inited = true;
+/* Mount the given slot with GCMM's defensive retry pattern:
+ *   - EXI_ProbeReset() before each attempt clears stale EXI channel
+ *     state from whatever .dol ran before us (Swiss, IPL, prior app).
+ *     Without this, the controller can be stuck mid-transaction and
+ *     CARD_Mount blocks forever on an IRQ that never fires.
+ *   - CARD_Init(NULL, NULL) per attempt (NULL = "see all gamecodes"
+ *     during scan; the read/write path resets gamecode + company to
+ *     the file's own values before CARD_Open).
+ *   - Up to 10 retries with VSync waits in between, since real cards
+ *     genuinely miss the first 1-2 probes on some hardware.
+ *
+ * Lifted from suloku's GCMM mcard.c MountCard(). */
+static int pb_card_mount_retry(int slot) {
+    int ret = -1;
+    for (int tries = 0; tries < 10 && ret < 0; tries++) {
+        EXI_ProbeReset();
+        CARD_Init(NULL, NULL);
+        CARD_SetCompany(NULL);
+        CARD_SetGamecode(NULL);
+        ret = CARD_Mount(slot, s_workarea, NULL);
+        if (ret >= 0) break;
+        VIDEO_WaitVSync();
+    }
+    return ret;
 }
 
 /* Game code dispatch. Real Pokémon GameCube product codes (regional
@@ -46,7 +69,7 @@ const char *pb_card_game_name(pb_card_game_t g) {
 typedef char pb_card_blob_size_check[(sizeof(card_dir) <= PB_CARD_DIR_BLOB_SIZE) ? 1 : -1];
 
 static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count) {
-    int err = CARD_Mount(slot, s_workarea, NULL);
+    int err = pb_card_mount_retry(slot);
     if (err < 0) return 0;  /* no card / unformatted / etc. */
 
     /* GCMM pattern: SetGamecode(NULL)/SetCompany(NULL) disables the
@@ -80,11 +103,11 @@ static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count
 }
 
 int pb_card_scan(pb_card_entry_t *out, int max) {
-    /* Pause libasnd's ~1 kHz DSP IRQ for the duration of the scan --
-     * otherwise the EXI completion interrupts libcard waits on can be
-     * starved and CARD_Mount deadlocks. */
+    /* Pause libaesnd just in case (cheap insurance against DSP IRQ
+     * starving EXI completion, even though libaesnd's design should
+     * already avoid this). The real fix is EXI_ProbeReset() inside
+     * pb_card_mount_retry. */
     pb_audio_suspend();
-    ensure_inited();
     int total = 0;
     total += scan_slot(CARD_SLOTA, out, max, total);
     total += scan_slot(CARD_SLOTB, out, max, total);
@@ -115,9 +138,8 @@ static size_t do_card_read(const pb_card_entry_t *entry, uint8_t *out_buf,
     status->bytes_read = 0;
 
     if (!entry || !out_buf) { status->stage = PB_CARD_ERR_BAD_ARGS; return 0; }
-    ensure_inited();
 
-    int rc = CARD_Mount(entry->slot, s_workarea, NULL);
+    int rc = pb_card_mount_retry(entry->slot);
     if (rc < 0) {
         status->stage = PB_CARD_ERR_MOUNT;
         status->libogc_rc = rc;
@@ -205,9 +227,8 @@ static size_t do_card_write(const pb_card_entry_t *entry, const uint8_t *buf,
         status->stage = PB_CARD_ERR_BAD_ARGS;
         return 0;
     }
-    ensure_inited();
 
-    int rc = CARD_Mount(entry->slot, s_workarea, NULL);
+    int rc = pb_card_mount_retry(entry->slot);
     if (rc < 0) {
         status->stage = PB_CARD_ERR_MOUNT;
         status->libogc_rc = rc;
