@@ -104,16 +104,42 @@ static void jb_send(int port, uint32_t msg) {
     while (g_transval == 0) ;
 }
 
+/* Scan ports 0-3 once with short timeouts. Used when the caller is doing
+ * its own polling loop and wants a quick snapshot. */
 int pb_joybus_detect_gba_port(void) {
     ensure_bufs();
     for (int port = 0; port < 4; port++) {
         g_resval = 0;
         SI_GetTypeAsync(port, acb);
-        /* Wait briefly for the async probe to complete. */
-        for (int i = 0; i < 4 && g_resval == 0; i++) VIDEO_WaitVSync();
+        for (int i = 0; i < 8 && g_resval == 0; i++) VIDEO_WaitVSync();
         if (g_resval == 0) continue;
+        /* 0x80 / bit-8 mean "device not ready yet" -- retry, don't skip. */
         if (g_resval == 0x80 || (g_resval & 8)) continue;
         if (g_resval & SI_GBA) return port;
+    }
+    return -1;
+}
+
+/* Block until a GBA is detected on any port or `timeout_vsyncs` elapses.
+ * Per-port reprobes on 0x80 / bit-8 responses match FIX94's reference flow,
+ * which is essential because the GBA's BIOS takes several seconds after
+ * power-on to transition from its splash to the multiboot wait state. The
+ * optional callback gets called once per vsync with the current port being
+ * polled (0..3) so the UI can show progress; return false to abort. */
+int pb_joybus_wait_for_gba(int timeout_vsyncs, pb_joybus_progress_cb cb, void *ctx) {
+    ensure_bufs();
+    int port = 0;
+    for (int v = 0; v < timeout_vsyncs; v++) {
+        g_resval = 0;
+        SI_GetTypeAsync(port, acb);
+        /* One vsync window for the async probe to land. */
+        VIDEO_WaitVSync();
+        if (g_resval && g_resval != 0x80 && !(g_resval & 8)) {
+            if (g_resval & SI_GBA) return port;
+        }
+        if (cb && !cb((uint32_t)v, (uint32_t)timeout_vsyncs, ctx)) return -1;
+        /* Round-robin through ports so we don't get stuck on one. */
+        port = (port + 1) & 3;
     }
     return -1;
 }

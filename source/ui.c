@@ -1758,61 +1758,95 @@ void pb_ui_run_graphics_app(void) {
                     break;
                 }
                 case 4: {
-                    /* GBA cart via link cable. Untested -- no cable on hand,
-                     * but the multiboot + save-dump protocol port mirrors
-                     * FIX94's reference exactly. */
+                    /* GBA cart via link cable. */
                     pb_gfx_clear();
                     gfx_draw_title_bar("GBA Link Cable");
-                    gfx_draw_panel(60, 80, 520, 110, "STATUS");
+                    gfx_draw_panel(60, 80, 520, 130, "INSTRUCTIONS");
                     pb_gfx_text(80, 110, PB_GFX_COLOR_TEXT,
-                                "Plug a GBA into a controller port via the");
-                    pb_gfx_text(80, 126, PB_GFX_COLOR_TEXT,
-                                "GameCube-GBA link cable. Power on the GBA");
+                                "1. Plug an official GameCube-GBA cable into");
+                    pb_gfx_text(96, 126, PB_GFX_COLOR_TEXT,
+                                "Port 2 (matches FIX94's reference layout).");
                     pb_gfx_text(80, 142, PB_GFX_COLOR_TEXT,
-                                "with NO cart, reach the multiboot prompt,");
+                                "2. Power on the GBA with NO cart inserted.");
                     pb_gfx_text(80, 158, PB_GFX_COLOR_TEXT,
-                                "then press A here to start.");
-                    pb_gfx_text(80, 178, PB_GFX_COLOR_TEXT_DIM,
-                                "(Press B to cancel)");
+                                "3. Wait until the GBA shows the GAMEBOY logo");
+                    pb_gfx_text(96, 174, PB_GFX_COLOR_TEXT,
+                                "then transitions to the gradient/swirl screen");
+                    pb_gfx_text(96, 190, PB_GFX_COLOR_TEXT,
+                                "(BIOS in multiboot wait).");
 
-                    /* Boxart hint */
-                    pb_gfx_boxart(60, 210, 200, 220, PB_BOXART_SAPPHIRE);
+                    pb_gfx_boxart(60, 230, 200, 200, PB_BOXART_SAPPHIRE);
 
-                    /* Right column: live port status */
-                    gfx_draw_panel(280, 210, 300, 220, "PORT");
-                    int port = pb_joybus_detect_gba_port();
-                    char buf[64];
-                    if (port < 0) {
-                        pb_gfx_text(300, 240, PB_GFX_COLOR_PANEL_ACCENT,
-                                    "No GBA detected.");
-                    } else {
-                        snprintf(buf, sizeof buf, "GBA found on port %d!", port + 1);
-                        pb_gfx_text(300, 240, PB_GFX_COLOR_TEXT_ACCENT, buf);
-                    }
-                    pb_gfx_text(300, 270, PB_GFX_COLOR_TEXT_DIM,
-                                "Expected sequence:");
-                    pb_gfx_text(316, 290, PB_GFX_COLOR_TEXT_DIM,
-                                "1. Multiboot dumper ROM");
-                    pb_gfx_text(316, 306, PB_GFX_COLOR_TEXT_DIM,
-                                "2. Wait for cart insertion");
-                    pb_gfx_text(316, 322, PB_GFX_COLOR_TEXT_DIM,
-                                "3. Read save into memory");
-                    pb_gfx_text(316, 338, PB_GFX_COLOR_TEXT_DIM,
-                                "4. Open in party browser");
-                    pb_gfx_text(300, 372, PB_GFX_COLOR_PANEL_ACCENT,
-                                "UNTESTED (no cable on hand).");
-                    pb_gfx_text(300, 388, PB_GFX_COLOR_PANEL_ACCENT,
-                                "Treat output cautiously.");
+                    gfx_draw_panel(280, 230, 300, 200, "POLLING");
+                    pb_gfx_text(300, 260, PB_GFX_COLOR_TEXT_DIM,
+                                "Press A to start. The app will poll");
+                    pb_gfx_text(300, 276, PB_GFX_COLOR_TEXT_DIM,
+                                "all 4 ports for up to 30 seconds");
+                    pb_gfx_text(300, 292, PB_GFX_COLOR_TEXT_DIM,
+                                "while you finish powering the GBA on.");
+                    pb_gfx_text(300, 318, PB_GFX_COLOR_PANEL_ACCENT,
+                                "Pokemon Box-style links won't work --");
+                    pb_gfx_text(300, 334, PB_GFX_COLOR_PANEL_ACCENT,
+                                "that's a cart-side protocol. We need");
+                    pb_gfx_text(300, 350, PB_GFX_COLOR_PANEL_ACCENT,
+                                "the GBA in raw BIOS multiboot mode.");
 
-                    gfx_draw_hint_bar("A: start   B: cancel");
+                    gfx_draw_hint_bar("A: start polling   B: cancel");
                     pb_gfx_flip();
                     uint16_t gb = pb_gfx_wait_button();
                     if (gb & PAD_BUTTON_B) break;
                     if (!(gb & PAD_BUTTON_A)) break;
+
+                    /* Live polling loop: probe every vsync, redraw the
+                     * progress UI, allow cancel via B. */
+                    int port = -1;
+                    for (int v = 0; v < 1800 && port < 0; v++) {
+                        port = pb_joybus_wait_for_gba(1, NULL, NULL);
+                        pb_gfx_clear();
+                        gfx_draw_title_bar("Waiting for GBA...");
+                        gfx_draw_panel(60, 110, 520, 240, NULL);
+                        pb_gfx_text(90, 150, PB_GFX_COLOR_TEXT_ACCENT,
+                                    "Polling all 4 ports...");
+                        char prog[64];
+                        snprintf(prog, sizeof prog, "Elapsed: %d.%d s",
+                                 v / 60, (v % 60) / 6);
+                        pb_gfx_text(90, 180, PB_GFX_COLOR_TEXT, prog);
+                        pb_gfx_text(90, 210, PB_GFX_COLOR_TEXT_DIM,
+                                    "Make sure GBA is powered on, no cart.");
+                        pb_gfx_text(90, 226, PB_GFX_COLOR_TEXT_DIM,
+                                    "It can take 5-15s after power-on for the");
+                        pb_gfx_text(90, 242, PB_GFX_COLOR_TEXT_DIM,
+                                    "GBA BIOS to enter multiboot wait.");
+                        gfx_draw_hint_bar("B: cancel");
+                        pb_gfx_flip();
+                        PAD_ScanPads();
+                        if (PAD_ButtonsDown(0) & PAD_BUTTON_B) break;
+                    }
                     if (port < 0) {
-                        /* Try harder to detect */
-                        port = pb_joybus_detect_gba_port();
-                        if (port < 0) break;
+                        pb_gfx_clear();
+                        gfx_draw_title_bar("No GBA detected");
+                        gfx_draw_panel(60, 110, 520, 280, NULL);
+                        pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT,
+                                    "Timed out without detecting a GBA.");
+                        pb_gfx_text(90, 178, PB_GFX_COLOR_TEXT, "Things to check:");
+                        pb_gfx_text(110, 198, PB_GFX_COLOR_TEXT_DIM,
+                                    "* Cable in Port 2 (try other ports too)");
+                        pb_gfx_text(110, 214, PB_GFX_COLOR_TEXT_DIM,
+                                    "* Cable is the official GameCube-GBA");
+                        pb_gfx_text(110, 230, PB_GFX_COLOR_TEXT_DIM,
+                                    "  cable (DOL-011), NOT a GBA-GBA cable");
+                        pb_gfx_text(110, 246, PB_GFX_COLOR_TEXT_DIM,
+                                    "* GBA is powered on with NO cart inserted");
+                        pb_gfx_text(110, 262, PB_GFX_COLOR_TEXT_DIM,
+                                    "* If GBA stays on GAMEBOY splash, the");
+                        pb_gfx_text(110, 278, PB_GFX_COLOR_TEXT_DIM,
+                                    "  BIOS hasn't entered multiboot mode yet");
+                        pb_gfx_text(110, 294, PB_GFX_COLOR_TEXT_DIM,
+                                    "  -- wait a few more seconds, retry");
+                        gfx_draw_hint_bar("Press any button");
+                        pb_gfx_flip();
+                        pb_gfx_wait_button();
+                        break;
                     }
 
                     /* Run multiboot with simple progress UI. */

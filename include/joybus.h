@@ -40,8 +40,16 @@ typedef struct {
  * transfers. Return false to abort. */
 typedef bool (*pb_joybus_progress_cb)(uint32_t cur, uint32_t total, void *ctx);
 
-/* Probe SI ports 0-3 for a GBA. Returns first port that responds, or -1. */
+/* Probe SI ports 0-3 once for a GBA. Returns first port that responds, or
+ * -1. Quick snapshot; for ongoing detection use pb_joybus_wait_for_gba. */
 int pb_joybus_detect_gba_port(void);
+
+/* Block until a GBA is detected on any port or `timeout_vsyncs` elapses.
+ * Calls `cb(cur, total, ctx)` once per vsync; return false from the
+ * callback to abort. Returns the detected port (0..3) or -1 on timeout
+ * / user cancel. */
+int pb_joybus_wait_for_gba(int timeout_vsyncs,
+                           pb_joybus_progress_cb cb, void *ctx);
 
 /* Multiboot the GBA-side dumper ROM onto the given port. May take a few
  * seconds (~60 KB transfer at ~250 KB/s). */
