@@ -9,6 +9,7 @@ The interface is fully graphical with a Pokémon Box: Ruby & Sapphire aesthetic 
 - **Read** Gen 3 GBA `.sav` files (128 KB) directly from SD card via Swiss
 - **Read** Pokémon XD `.gci` files (encrypted with GeniusCrypto)
 - **Read** Pokémon Colosseum `.gci` files (encrypted with SHA-1 chain XOR)
+- **Scan a physical GameCube memory card** for XD / Colosseum / Pokémon Box saves and load them directly (no need to extract to SD first)
 - **Edit** any Pokémon: IVs, EVs, moves, nature, shiny toggle, friendship, held item
   - Shiny toggle preserves nature via PID re-rolling; nature edit preserves shiny status
   - Sprites swap to the shiny variant live in the preview
@@ -88,6 +89,15 @@ sd:/pokebridge/export/           ← legalized .pk3 files land here
 
 Boot via Swiss → `sd:/apps/pokebridge/boot.dol`. The graphics menu loads directly.
 
+### Wii / Wii U compatibility
+
+Works on a **homebrew-enabled Wii running in GameCube mode** (Nintendont, Swiss-r, or the disc-channel GameCube backwards-compat on the original Wii). The Wii's two GameCube memory card slots are exposed as slot A / slot B just like on a real GameCube, so the "Scan GameCube memory card" feature picks up XD / Colosseum / Pokémon Box saves there too.
+
+What does **not** work:
+- Wii U vWii (no native GameCube hardware exposed)
+- Wii in Wii-mode SD slot for GC memcards (PokéBridge runs as a GC homebrew, so it sees GC slots only)
+- Wii without GameCube ports (the family-edition / later "Wii Mini" hardware revisions)
+
 ## Optional: embed your own demo saves
 
 If you want save files baked into the `.dol` (so they work without an SD card — handy for Dolphin testing), drop them into the `data/` folder and run:
@@ -128,9 +138,16 @@ ROM-hack Pokémon (species ID > 386) are mapped to nearest Gen 3 analogues via a
 - **Box art** is procedural — gradient panel + cover-species sprite + game name. Eight games: Ruby/Sapphire/Emerald/FireRed/LeafGreen + Colosseum/XD/Pokémon Box: R&S.
 - **Editor** is graphics-mode throughout with sub-screens for each field. Shiny re-rolls PID under a nature-preserving constraint; nature edit preserves shiny status.
 
-### GBA link cable (untested)
+### GBA link cable
 
-Mirror of FIX94's `gba-link-cable-dumper`. Detects a GBA on a controller port, runs the Nintendo multiboot handshake to upload a 60 KB dumper ROM, then the dumper streams the cart's SRAM back. Untested without a physical cable but the protocol port is faithful.
+Mirror of FIX94's `gba-link-cable-dumper`. Detects a GBA on a controller port, runs the Nintendo multiboot handshake to upload a 60 KB dumper ROM, then the dumper streams the cart's SRAM back.
+
+**Known issue: internal SI-bus controller mods (BlueRetro, etc.) interfere with the multiboot upload.** Detection works intermittently because the GBA wins some SI probes against the mod's controller emulation, but the sustained ~60 KB multiboot transfer needs every SI exchange to land cleanly, and the mod answering any of them corrupts the CRC and aborts the upload. The GBA ends up sitting on the GAME BOY splash forever (which is actually the correct multiboot-wait state — the bug is upstream).
+
+If you have a BlueRetro or similar internal SI-bus mod:
+- The graphics-mode "Joybus debug" screen (hold Z while entering the link-cable menu) will show the response flapping between "device not ready" and "GBA detected!" — that's the smoking gun
+- Workaround: swap back to a stock controller board for the dump, or check if your mod's firmware supports a per-port disable
+- The Gen 3 / XD / Colosseum SD-card paths are not affected; only the GBA link cable dump is
 
 ## Status
 
@@ -138,10 +155,10 @@ Mirror of FIX94's `gba-link-cable-dumper`. Detects a GBA on a controller port, r
 |--------|------|------|-------|
 | Gen 3 GBA (Ruby/Sapphire/Emerald/FireRed/LeafGreen) | ✅ | ✅ | ✅ |
 | pokeemerald-expansion ROM hacks (Seaglass, Lazarus, etc.) | ✅ | ✅ | ✅ |
-| Pokémon XD: Gale of Darkness | ✅ | ✅ | ✅ |
-| Pokémon Colosseum | ✅ | ✅ | ✅ |
-| GBA cart over link cable | 🟡 ported, untested | n/a | n/a |
-| Pokémon Box: Ruby & Sapphire | ❌ planned | ❌ | ❌ |
+| Pokémon XD: Gale of Darkness (SD + memcard) | ✅ | ✅ | ✅ |
+| Pokémon Colosseum (SD + memcard) | ✅ | ✅ | ✅ |
+| GBA cart over link cable | 🟡 ported, blocked by SI-mod hardware | n/a | n/a |
+| Pokémon Box: Ruby & Sapphire | 🟡 memcard detection only | ❌ | ❌ |
 
 ## Credits
 

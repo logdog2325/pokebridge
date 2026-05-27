@@ -7,6 +7,7 @@
 #include "embedded_colo_save.h"
 #include "pb_xd.h"
 #include "pb_colo.h"
+#include "pb_card.h"
 #include "pb_gfx.h"
 #include "endian_le.h"
 #include <gccore.h>
@@ -1479,6 +1480,7 @@ void pb_ui_run_graphics_app(void) {
         "Load Pokemon Colosseum save (demo)",
         "Read GBA cart via link cable",
         "Open save from SD card",
+        "Scan GameCube memory card",
         "Game art gallery",
         "About PokeBridge",
         "Exit",
@@ -1516,9 +1518,10 @@ void pb_ui_run_graphics_app(void) {
             PB_BOXART_COLOSSEUM,  /* 3: Colosseum demo       */
             PB_BOXART_SAPPHIRE,   /* 4: GBA link cable       */
             PB_BOXART_RUBY,       /* 5: Open from SD         */
-            PB_BOXART_LEAFGREEN,  /* 6: Game art gallery     */
-            PB_BOXART_BOX,        /* 7: About                */
-            PB_BOXART_UNKNOWN,    /* 8: Exit                 */
+            PB_BOXART_BOX,        /* 6: Scan memcard         */
+            PB_BOXART_LEAFGREEN,  /* 7: Game art gallery     */
+            PB_BOXART_BOX,        /* 8: About                */
+            PB_BOXART_UNKNOWN,    /* 9: Exit                 */
         };
         if (sel >= 0 && sel < (int)(sizeof art_for / sizeof art_for[0]) &&
             art_for[sel] != PB_BOXART_UNKNOWN) {
@@ -2124,6 +2127,111 @@ void pb_ui_run_graphics_app(void) {
                     break;
                 }
                 case 6: {
+                    /* Scan GameCube memory card slots A + B. */
+                    pb_card_entry_t cards[PB_CARD_MAX_ENTRIES];
+                    int n_cards = pb_card_scan(cards, PB_CARD_MAX_ENTRIES);
+                    if (n_cards <= 0) {
+                        for (;;) {
+                            pb_gfx_clear();
+                            gfx_draw_title_bar("Memory card scan");
+                            gfx_draw_panel(60, 110, 520, 260, NULL);
+                            pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT,
+                                        "No supported saves found.");
+                            pb_gfx_text(90, 180, PB_GFX_COLOR_TEXT_DIM,
+                                        "Looking for these game codes on slot A or B:");
+                            pb_gfx_text(110, 200, PB_GFX_COLOR_TEXT, "GXX* - Pokemon XD: Gale of Darkness");
+                            pb_gfx_text(110, 216, PB_GFX_COLOR_TEXT, "GC6* - Pokemon Colosseum");
+                            pb_gfx_text(110, 232, PB_GFX_COLOR_TEXT, "G3R* - Pokemon Box: Ruby & Sapphire");
+                            pb_gfx_text(90, 262, PB_GFX_COLOR_TEXT_DIM,
+                                        "Insert a memory card with one of those saves,");
+                            pb_gfx_text(90, 278, PB_GFX_COLOR_TEXT_DIM,
+                                        "or use 'Open save from SD card' if you've");
+                            pb_gfx_text(90, 294, PB_GFX_COLOR_TEXT_DIM,
+                                        "already extracted a .gci/.gcs file.");
+                            gfx_draw_hint_bar("B: back");
+                            pb_gfx_flip();
+                            uint16_t bb = pb_gfx_wait_button();
+                            if (bb & PAD_BUTTON_B) break;
+                        }
+                        break;
+                    }
+                    int csel = 0;
+                    for (;;) {
+                        pb_gfx_clear();
+                        gfx_draw_title_bar("Memory card saves");
+                        gfx_draw_panel(28, 70, 340, 360, "FOUND");
+                        for (int i = 0; i < n_cards; i++) {
+                            int yy = 100 + i * 38;
+                            uint32_t col = (i == csel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+                            if (i == csel) {
+                                pb_gfx_rounded_panel(43, yy - 6, 310, 36, 4, PB_GFX_COLOR_PANEL_LIGHT, 180);
+                            }
+                            char line[80];
+                            snprintf(line, sizeof line, "%s [%s]",
+                                     pb_card_game_name(cards[i].game), cards[i].gamecode);
+                            pb_gfx_text(55, yy, col, line);
+                            snprintf(line, sizeof line, "Slot %c   %s",
+                                     cards[i].slot == 0 ? 'A' : 'B', cards[i].filename);
+                            pb_gfx_text(55, yy + 16, PB_GFX_COLOR_TEXT_DIM, line);
+                        }
+                        /* Box art preview on the right */
+                        pb_boxart_t art = PB_BOXART_UNKNOWN;
+                        switch (cards[csel].game) {
+                            case PB_CARD_GAME_XD:        art = PB_BOXART_XD; break;
+                            case PB_CARD_GAME_COLOSSEUM: art = PB_BOXART_COLOSSEUM; break;
+                            case PB_CARD_GAME_BOX:       art = PB_BOXART_BOX; break;
+                            default: break;
+                        }
+                        pb_gfx_boxart(390, 70, 220, 320, art);
+                        gfx_draw_hint_bar("DPad: select   A: load   B: back");
+                        pb_gfx_flip();
+                        uint16_t bb = pb_gfx_wait_button();
+                        if (bb & PAD_BUTTON_B) break;
+                        if (bb & PAD_BUTTON_UP)   csel = (csel + n_cards - 1) % n_cards;
+                        if (bb & PAD_BUTTON_DOWN) csel = (csel + 1) % n_cards;
+                        if (bb & PAD_BUTTON_A) {
+                            static uint8_t cardbuf[PB_CARD_MAX_FILE_BYTES];
+                            size_t got = pb_card_read_file(&cards[csel], cardbuf,
+                                                           sizeof cardbuf);
+                            if (got == 0) {
+                                /* Read failed -- show error */
+                                pb_gfx_clear();
+                                gfx_draw_title_bar("Read failed");
+                                gfx_draw_panel(120, 180, 400, 140, NULL);
+                                pb_gfx_text(140, 220, PB_GFX_COLOR_PANEL_ACCENT,
+                                            "Card read failed. Card removed?");
+                                gfx_draw_hint_bar("Press any button");
+                                pb_gfx_flip();
+                                pb_gfx_wait_button();
+                                continue;
+                            }
+                            if (cards[csel].game == PB_CARD_GAME_XD) {
+                                static pb_xd_save_t xs;
+                                if (pb_xd_load(&xs, cardbuf, got)) gfx_xd_party_screen(&xs);
+                            } else if (cards[csel].game == PB_CARD_GAME_COLOSSEUM) {
+                                static pb_colo_save_t cs;
+                                if (pb_colo_load(&cs, cardbuf, got)) gfx_colo_party_screen(&cs);
+                            } else {
+                                /* Pokemon Box: no parser yet */
+                                pb_gfx_clear();
+                                gfx_draw_title_bar("Pokemon Box");
+                                gfx_draw_panel(120, 180, 400, 160, NULL);
+                                pb_gfx_text(140, 210, PB_GFX_COLOR_TEXT_ACCENT,
+                                            "Pokemon Box: R&S parser coming.");
+                                pb_gfx_text(140, 230, PB_GFX_COLOR_TEXT_DIM,
+                                            "Save data was read OK from the card.");
+                                char info[64];
+                                snprintf(info, sizeof info, "%u bytes available.", (unsigned)got);
+                                pb_gfx_text(140, 246, PB_GFX_COLOR_TEXT_DIM, info);
+                                gfx_draw_hint_bar("Press any button");
+                                pb_gfx_flip();
+                                pb_gfx_wait_button();
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 7: {
                     /* Game art gallery -- cycle through all 8 mainstream
                      * Gen 3 boxarts. */
                     static const pb_boxart_t gallery[] = {
@@ -2170,7 +2278,7 @@ void pb_ui_run_graphics_app(void) {
                     }
                     break;
                 }
-                case 7: {
+                case 8: {
                     /* About */
                     for (;;) {
                         pb_gfx_clear();
@@ -2223,7 +2331,7 @@ void pb_ui_run_graphics_app(void) {
                     }
                     break;
                 }
-                case 8: return;
+                case 9: return;
             }
         }
     }
