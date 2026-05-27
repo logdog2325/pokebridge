@@ -289,6 +289,86 @@ void pb_xd_redecrypt_slot(pb_xd_save_t *xs) {
                       PB_XD_ENC_END - PB_XD_ENC_START, keys);
 }
 
+/* PKHeX SpeciesConverter.GetInternal3 -- maps national-dex IDs to the
+ * internal IDs used by XD and Colosseum. Both games use the same map.
+ * Natdex 1..251 are passthrough. 252+ shift by the signed offsets in
+ * Table3NationalToInternal. */
+uint16_t pb_natdex_to_internal3(uint16_t natdex) {
+    if (natdex < 252) return natdex;
+    static const int8_t T[147] = {
+        25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,
+        25,25,25,25,28,28,31,31,112,112,112,28,28,21,21,77,77,77,11,11,
+        11,77,77,77,39,39,52,21,15,15,20,52,78,78,78,49,49,28,28,42,
+        42,73,73,48,51,51,12,12,-7,-7,17,17,-3,26,26,-19,4,4,4,13,
+        13,25,25,45,43,11,11,-16,-16,-15,-15,-25,-25,43,43,43,43,-21,-21,34,
+        -35,24,24,6,6,12,53,17,0,-15,-15,-22,-22,-22,7,7,7,12,-45,24,
+        24,24,24,24,24,24,24,24,27,27,22,22,22,24,24
+    };
+    unsigned idx = (unsigned)(natdex - 252u);
+    if (idx >= sizeof T) return natdex;
+    return (uint16_t)(natdex + T[idx]);
+}
+
+/* Encode an ASCII name into XD/Colo's UTF-16 BE 22-byte buffer
+ * (10 chars max + NUL terminator). Same format both games use. */
+static void enc_gc_name(uint8_t *dst22, const char *ascii) {
+    memset(dst22, 0, 22);
+    if (!ascii) return;
+    for (int i = 0; i < 10 && ascii[i]; i++) {
+        dst22[i * 2]     = 0x00;
+        dst22[i * 2 + 1] = (uint8_t)ascii[i];
+    }
+}
+
+/* Build a fresh 196-byte XK3 record. The game will load this without
+ * complaint as long as the outer slot is re-finalized (set_checksums +
+ * encrypt) afterwards. Defaults: level 5, Tackle, all IVs 0, no shadow,
+ * Poke Ball, English, no held item, friendship 70. */
+void pb_xk3_create_default(uint8_t r[196], uint16_t species_natdex,
+                           const char *trainer_name_gen3,
+                           uint16_t tid, uint16_t sid) {
+    memset(r, 0, 196);
+
+    wr_u16be(r + 0x00, pb_natdex_to_internal3(species_natdex));
+    /* 0x02 held_item = 0 */
+    wr_u16be(r + 0x04, 20);                  /* HP current placeholder */
+    wr_u16be(r + 0x06, 70);                  /* friendship (low byte) */
+    /* 0x08 met_location = 0 */
+    r[0x0E] = 5;                             /* met level */
+    r[0x0F] = 4;                             /* Poke Ball */
+    r[0x10] = 0;                             /* OT gender male */
+    r[0x11] = 5;                             /* current level */
+    /* 0x1D XDPKMFLAGS: Valid bit must be CLEAR (= 0x00 byte). */
+    r[0x1D] = 0x00;
+    wr_u32be(r + 0x20, 135);                 /* EXP @ L5 medium-fast */
+    wr_u16be(r + 0x24, sid);
+    wr_u16be(r + 0x26, tid);
+    /* PID: derived from TID/SID/species so each generated mon differs. */
+    uint32_t pid = ((uint32_t)tid << 16) | (uint32_t)(sid ^ species_natdex ^ 0xA53Cu);
+    if (pid == 0) pid = 0x12345678u;
+    wr_u32be(r + 0x28, pid);
+    r[0x30] = 1;                             /* Obedient */
+    r[0x34] = 1;                             /* GCVersion: Ruby-equivalent */
+    r[0x35] = 1;                             /* CurrentRegion: NTSC-U */
+    r[0x36] = 1;                             /* OriginalRegion */
+    r[0x37] = 2;                             /* Language: English */
+    enc_gc_name(r + 0x38, trainer_name_gen3);
+    /* Auto-nickname = species name (matches what XD does for newly
+     * caught mons). pb_species_name returns "Bulbasaur", "Charizard"
+     * etc.; XD will display these capitalized in its UI anyway. */
+    const char *nick = pb_species_name(species_natdex);
+    enc_gc_name(r + 0x4E, nick);             /* nickname display */
+    enc_gc_name(r + 0x64, nick);             /* nickname */
+    /* Moves: Tackle in slot 0. */
+    wr_u16be(r + 0x80, 33);                  /* Tackle */
+    r[0x82] = 35;                            /* PP */
+    r[0x83] = 0;                             /* PP-Ups */
+    /* Slots 1..3 zero = no move. */
+    wr_u16be(r + 0x90, 20);                  /* HPmax placeholder */
+    /* EVs / IVs all zero. */
+    /* ShadowID at 0xBA = 0 (not shadow). */
+}
+
 bool pb_xd_write_file(pb_xd_save_t *xs, const char *path) {
     if (!xs || !path) return false;
     pb_xd_finalize_slot(xs);

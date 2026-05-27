@@ -104,6 +104,15 @@ uint32_t pb_colo_box_slot_offset(const pb_colo_save_t *cs, int box_index, int sl
 void pb_ck3_to_pkm(pb_pkm_t *out, const uint8_t *raw312);
 void pb_ck3_apply_pkm_edits(const pb_pkm_t *p, uint8_t *raw312);
 
+/* Build a fresh 312-byte CK3 record from scratch with sensible defaults
+ * (level 5, Tackle, Poké Ball, no shadow, friendship 70, all IVs 0).
+ * Used when the user creates a new Pokémon in an empty Colo party/box
+ * slot. Caller is responsible for calling pb_colo_finalize_slot before
+ * writing the save back so checksums + crypto match. */
+void pb_ck3_create_default(uint8_t raw_out[312], uint16_t species_natdex,
+                            const char *trainer_name_gen3,
+                            uint16_t tid, uint16_t sid);
+
 /* After in-memory edits, recompute checksums and re-encrypt the slot. */
 void pb_colo_finalize_slot(pb_colo_save_t *cs);
 

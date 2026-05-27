@@ -21,8 +21,20 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <fat.h>
 
 extern bool pb_sd_available;
+
+/* Lazy SD mount. Boot intentionally skips fatInitDefault to avoid
+ * libfat's EXI_Lock(channel 0) which permanently breaks slot-A
+ * memcard scans on Swiss + SD2SP2 setups. This function is called
+ * from every SD-needing menu path; on first call it tries to mount
+ * and remembers the result. Returns true if SD is accessible. */
+static bool pb_sd_try_mount(void) {
+    if (pb_sd_available) return true;
+    pb_sd_available = fatInitDefault();
+    return pb_sd_available;
+}
 
 /* Swiss / PSO-SDload reload stub lives at 0x80001800.
  *   0x80001800: branch instruction (entry point)
@@ -376,7 +388,7 @@ void pb_ui_browse_party(pb_save_t *s) {
                     pb_save_update_section_checksum(s, 1);
                     pb_ui_header("Saved");
                     printf("Edits written to in-memory save.\n");
-                    if (pb_sd_available) {
+                    if (pb_sd_try_mount()) {
                         mkdir("sd:/pokebridge", 0777);
                         mkdir("sd:/pokebridge/saves", 0777);
                         if (pb_save_write_file(s, "sd:/pokebridge/saves/edited.sav")) {
@@ -394,7 +406,7 @@ void pb_ui_browse_party(pb_save_t *s) {
                 uint8_t out80[80];
                 pb_legalize_report_t r;
                 if (pb_legalize(&p, out80, &r)) {
-                    if (pb_sd_available) {
+                    if (pb_sd_try_mount()) {
                         mkdir("sd:/pokebridge", 0777);
                         mkdir("sd:/pokebridge/export", 0777);
                         char path[128];
@@ -408,7 +420,7 @@ void pb_ui_browse_party(pb_save_t *s) {
                     printf("%u -> %u  (%d moves remapped, %d dropped)\n",
                            r.orig_species, r.legal_species,
                            r.moves_remapped, r.moves_dropped);
-                    if (!pb_sd_available) printf("(no SD; .pk3 not written)\n");
+                    if (!pb_sd_try_mount()) printf("(no SD; .pk3 not written)\n");
                     pb_ui_footer("Press any button");
                     pb_ui_wait_button();
                 }
@@ -476,6 +488,11 @@ static const pb_card_entry_t *g_colo_card_src = NULL;
  * edits stay valid. Shows result on screen. */
 static void gfx_save_xd_to_memcard(pb_xd_save_t *xs, const pb_card_entry_t *entry);
 static void gfx_save_colo_to_memcard(pb_colo_save_t *cs, const pb_card_entry_t *entry);
+
+/* Phase 1 creators (defined later in this file, used by the
+ * XD/Colo party + box screens which appear above them). */
+static bool gfx_create_xk3_flow(pb_xd_save_t *xs, uint8_t raw_out[196]);
+static bool gfx_create_ck3_flow(pb_colo_save_t *cs, uint8_t raw_out[312]);
 
 /* Detect a save file's game by header / size. */
 static pb_boxart_t detect_boxart_from_save(const pb_save_t *s) {
@@ -833,7 +850,13 @@ static void gfx_xd_party_screen(pb_xd_save_t *xs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = xs->slot + xs->party_offset + sel * PB_XD_PKM_SIZE;
             pb_pkm_t p; pb_xk3_to_pkm(&p, raw);
-            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
+            if (p.is_empty) {
+                uint8_t fresh[196];
+                if (gfx_create_xk3_flow(xs, fresh)) {
+                    memcpy(raw, fresh, 196);
+                    edited = true;
+                }
+            } else if (gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
                 edited = true;
             }
         }
@@ -955,7 +978,7 @@ static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
 
                 /* Effect description */
                 pb_gfx_text(80, 280, PB_GFX_COLOR_TEXT, "Output: 80-byte .pk3 file");
-                if (pb_sd_available) {
+                if (pb_sd_try_mount()) {
                     pb_gfx_text(80, 298, PB_GFX_COLOR_TEXT, "Location: sd:/pokebridge/export/");
                 } else {
                     pb_gfx_text(80, 298, PB_GFX_COLOR_TEXT_DIM,
@@ -972,7 +995,7 @@ static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
                 if (bb & PAD_BUTTON_A) {
                     uint8_t out80[80];
                     pb_legalize_report_t r;
-                    if (pb_legalize(p, out80, &r) && pb_sd_available) {
+                    if (pb_legalize(p, out80, &r) && pb_sd_try_mount()) {
                         mkdir("sd:/pokebridge", 0777);
                         mkdir("sd:/pokebridge/export", 0777);
                         char path[128];
@@ -991,7 +1014,7 @@ static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
                     snprintf(res, sizeof res, "%u -> %u (moves remapped: %d)",
                              p->g.species, new_sp, 0);
                     pb_gfx_text(140, 210, PB_GFX_COLOR_TEXT, res);
-                    if (pb_sd_available) {
+                    if (pb_sd_try_mount()) {
                         pb_gfx_text(140, 240, PB_GFX_COLOR_TEXT_DIM, "Wrote .pk3 to sd:/");
                     } else {
                         pb_gfx_text(140, 240, PB_GFX_COLOR_TEXT_DIM, "(no SD - exported in memory only)");
@@ -1009,6 +1032,94 @@ static bool gfx_show_pkm_detail(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
 /* ---- Graphics-mode editor sub-screens ---- */
 
 static const char *g_stat_short[6] = { "HP ", "Atk", "Def", "Spe", "SpA", "SpD" };
+
+/* Sum of all 6 EVs for a given mon. Used to enforce the 510 total cap. */
+static int pb_pkm_ev_total(const pb_pkm_t *p) {
+    int t = 0;
+    for (int i = 0; i < 6; i++) t += p->e.ev[i];
+    return t;
+}
+
+/* Clamp an EV write: per-stat cap = 252 (anything above is wasted --
+ * stats only update on multiples of 4, so 252 = 63 stat points and
+ * 253-255 give the same), and total cap = 510 across all 6 stats.
+ * Returns the actual value applied (which may be less than requested
+ * if the total would overflow). */
+static uint8_t pb_pkm_set_ev_legal(pb_pkm_t *p, int stat, int desired) {
+    if (desired < 0)   desired = 0;
+    if (desired > 252) desired = 252;
+    int others = pb_pkm_ev_total(p) - p->e.ev[stat];
+    int room   = 510 - others;
+    if (room < 0) room = 0;
+    if (desired > room) desired = room;
+    p->e.ev[stat] = (uint8_t)desired;
+    return (uint8_t)desired;
+}
+
+/* EV-specific editor: enforces Gen 3 legal caps (252/stat, 510/total),
+ * shows running total prominently, and warns when at the limit. */
+static void gfx_edit_evs_screen(pb_pkm_t *p) {
+    int sel = 0;
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Edit EVs");
+
+        /* Live mon preview on left */
+        gfx_draw_panel(28, 70, 200, 290, NULL);
+        pb_gfx_pkm_slot(60, 100, p->g.species, false, pb_pkm_is_shiny(p));
+        pb_gfx_text(60, 180, PB_GFX_COLOR_TEXT_ACCENT, pb_species_name(p->g.species));
+
+        /* Running total + legality readout on left panel */
+        int total = pb_pkm_ev_total(p);
+        int remaining = 510 - total;
+        char buf[64];
+        snprintf(buf, sizeof buf, "Total %d / 510", total);
+        pb_gfx_text(60, 220, PB_GFX_COLOR_TEXT_ACCENT, buf);
+        snprintf(buf, sizeof buf, "Remaining %d", remaining);
+        pb_gfx_text(60, 240, PB_GFX_COLOR_TEXT_DIM, buf);
+        pb_gfx_text(60, 268, PB_GFX_COLOR_TEXT_DIM, "Per-stat cap: 252");
+        if (total >= 510) {
+            pb_gfx_text(60, 296, PB_GFX_COLOR_PANEL_ACCENT, "AT TOTAL LIMIT");
+        } else if (total > 510 - 8) {
+            pb_gfx_text(60, 296, PB_GFX_COLOR_PANEL_ACCENT, "Near limit");
+        }
+
+        /* Stat editor list on right */
+        gfx_draw_panel(244, 70, 380, 290, "EVs (Gen 3)");
+        for (int i = 0; i < 6; i++) {
+            int yy = 110 + i * 32;
+            uint32_t col = (i == sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+            if (i == sel) {
+                pb_gfx_rounded_panel(255, yy - 6, 358, 24, 6, PB_GFX_COLOR_PANEL_LIGHT, 200);
+            }
+            uint8_t v = p->e.ev[i];
+            snprintf(buf, sizeof buf, "%s    %3u%s", g_stat_short[i], v,
+                     v >= 252 ? "  MAX" : "");
+            pb_gfx_text(275, yy, col, buf);
+            /* progress bar against per-stat 252 cap */
+            int barx = 380, bary = yy + 4, barw = 200;
+            pb_gfx_fill_rect(barx, bary, barw, 4, PB_GFX_COLOR_PANEL_LIGHT);
+            int fill = (v * barw) / 252;
+            if (fill > barw) fill = barw;
+            pb_gfx_fill_rect(barx, bary, fill, 4, PB_GFX_COLOR_PANEL_ACCENT);
+        }
+
+        gfx_draw_hint_bar("DPad: pick   L/R: -/+   A: max(252)   START: zero   B: done");
+        pb_gfx_flip();
+
+        uint16_t bt = pb_gfx_wait_button();
+        if (bt & PAD_BUTTON_B) return;
+        if (bt & PAD_BUTTON_UP)   sel = (sel + 5) % 6;
+        if (bt & PAD_BUTTON_DOWN) sel = (sel + 1) % 6;
+        int v = p->e.ev[sel];
+        if (bt & PAD_TRIGGER_L)    pb_pkm_set_ev_legal(p, sel, v - 1);
+        if (bt & PAD_TRIGGER_R)    pb_pkm_set_ev_legal(p, sel, v + 1);
+        if (bt & PAD_BUTTON_LEFT)  pb_pkm_set_ev_legal(p, sel, v - 10);
+        if (bt & PAD_BUTTON_RIGHT) pb_pkm_set_ev_legal(p, sel, v + 10);
+        if (bt & PAD_BUTTON_A)     pb_pkm_set_ev_legal(p, sel, 252);
+        if (bt & PAD_BUTTON_START) pb_pkm_set_ev_legal(p, sel, 0);
+    }
+}
 
 static void gfx_edit_stat_screen(pb_pkm_t *p, const char *title, int max_val,
                                  uint8_t (*getter)(const pb_pkm_t *, int),
@@ -1252,7 +1363,7 @@ static bool gfx_edit_pkm(pb_pkm_t *p) {
         if (bt & PAD_BUTTON_A) {
             switch (sel) {
                 case 0: gfx_edit_stat_screen(p, "Edit IVs", 31, pb_pkm_get_iv, pb_pkm_set_iv); break;
-                case 1: gfx_edit_stat_screen(p, "Edit EVs", 255, pb_pkm_get_ev, pb_pkm_set_ev); break;
+                case 1: gfx_edit_evs_screen(p); break;
                 case 2: gfx_edit_moves_screen(p); break;
                 case 3: gfx_pick_nature(p); break;
                 case 4: pb_pkm_toggle_shiny(p, !pb_pkm_is_shiny(p)); break;
@@ -1364,6 +1475,277 @@ static void gfx_pkm_party_screen(pb_save_t *s) {
     }
 }
 
+/* ---- Phase 1 Pokémon creator (local-only, GBA Gen 3 saves) ----
+ *
+ * Lets a user spawn a fresh Pokémon into an empty box slot. Sets
+ * the trainer's own OT/ID/SID, picks a default species/level/moves,
+ * then routes through the existing edit flow so they can tweak
+ * everything before commit.
+ *
+ * These Pokémon are CLEARLY HOMEBREW-MADE -- the encounter method,
+ * met location, and PID-vs-encounter constraints are not modeled.
+ * PKHeX will flag them as illegal and Pokémon HOME will quarantine
+ * them. That's intentional for Phase 1: keep it simple, keep it
+ * local. Phase 2 will port PKHeX's encounter generators for HOME
+ * compatibility. The UI warns explicitly. */
+
+/* Paged species picker. Returns species ID (1..386) or -1 on cancel.
+ * 14 per page with a small sprite preview of the highlighted species. */
+static int gfx_pick_species(int current) {
+    int sel = (current >= 1 && current <= 386) ? current : 1;
+    const int per_page = 14;
+    for (;;) {
+        int page = (sel - 1) / per_page;
+        int start = page * per_page + 1;
+        pb_gfx_clear();
+        gfx_draw_title_bar("Pick a species");
+        /* Sprite preview on the left */
+        gfx_draw_panel(28, 70, 200, 290, NULL);
+        pb_gfx_pkm_slot(60, 100, (uint16_t)sel, false, false);
+        pb_gfx_text(60, 180, PB_GFX_COLOR_TEXT_ACCENT, pb_species_name((uint16_t)sel));
+        char buf[64];
+        snprintf(buf, sizeof buf, "#%u", (unsigned)sel);
+        pb_gfx_text(60, 200, PB_GFX_COLOR_TEXT_DIM, buf);
+
+        /* List on the right */
+        gfx_draw_panel(244, 70, 380, 360, "SPECIES");
+        snprintf(buf, sizeof buf, "Page %d / %d", page + 1, (386 + per_page - 1) / per_page);
+        pb_gfx_text(260, 90, PB_GFX_COLOR_TEXT_DIM, buf);
+        for (int i = 0; i < per_page; i++) {
+            int idx = start + i;
+            if (idx > 386) break;
+            int yy = 110 + i * 20;
+            uint32_t col = (idx == sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
+            if (idx == sel) {
+                pb_gfx_rounded_panel(255, yy - 4, 358, 18, 4, PB_GFX_COLOR_PANEL_LIGHT, 200);
+            }
+            snprintf(buf, sizeof buf, "#%3d   %s", idx, pb_species_name((uint16_t)idx));
+            pb_gfx_text(270, yy, col, buf);
+        }
+        gfx_draw_hint_bar("DPad: select   L/R: page   A: pick   B: cancel");
+        pb_gfx_flip();
+        uint16_t bt = pb_gfx_wait_button();
+        if (bt & PAD_BUTTON_B) return -1;
+        if (bt & PAD_BUTTON_A) return sel;
+        if (bt & PAD_BUTTON_UP)   sel = (sel > 1) ? sel - 1 : 386;
+        if (bt & PAD_BUTTON_DOWN) sel = (sel < 386) ? sel + 1 : 1;
+        if (bt & PAD_TRIGGER_L)   sel = (sel > per_page) ? sel - per_page : 1;
+        if (bt & PAD_TRIGGER_R)   sel = (sel + per_page <= 386) ? sel + per_page : 386;
+    }
+}
+
+/* Cheap pseudo-random based on gettime() -- good enough for a one-shot
+ * PID. Not crypto-grade, doesn't need to be. */
+#include <ogc/lwp_watchdog.h>
+static uint32_t pb_quick_random(void) {
+    static uint32_t state = 0;
+    uint32_t mix = (uint32_t)ticks_to_microsecs(gettime());
+    state = state * 1103515245u + 12345u + mix;
+    return state ^ (state >> 13);
+}
+
+/* Build a default-state pb_pkm_t for the chosen species, with the
+ * save's trainer name/ID/SID baked in. Met info is "Faraway place"
+ * (0xFE) and game = Emerald -- placeholder values that the game will
+ * load but PKHeX will flag as illegal. Phase 2 fixes that. */
+static void build_default_pkm(pb_pkm_t *out, const pb_save_t *s, uint16_t species) {
+    memset(out, 0, sizeof *out);
+
+    /* Random PID with a fresh nature; user can re-roll later. */
+    out->pid = pb_quick_random();
+    if (out->pid == 0) out->pid = 0xC0FFEE00u;  /* never zero -- empty marker */
+
+    /* OT inherits from the active trainer. */
+    out->ot_id = ((uint32_t)s->secret_id << 16) | s->trainer_id;
+    /* Copy raw Gen 3-encoded OT name from section 0 (7 bytes). */
+    memcpy(out->ot_name, s->sec[0], 7);
+
+    /* Nickname: leave terminated. 0xFF at byte 0 = "use species default". */
+    out->nickname[0] = 0xFF;
+    for (int i = 1; i < 10; i++) out->nickname[i] = 0xFF;
+
+    out->language = 0x02;  /* English */
+    out->egg_flag = 0x02;  /* "has met its trainer" flag set, not an egg */
+    out->markings = 0;
+
+    /* Growth substructure */
+    out->g.species   = species;
+    out->g.held_item = 0;
+    /* Medium-fast curve, level 5 = 125 EXP. The editor lets the user
+     * change level after, which the existing UI handles via direct
+     * EXP edits. */
+    out->g.experience = 125;
+    out->g.pp_bonuses = 0;
+    out->g.friendship = 70;
+    out->g._unused = 0;
+
+    /* Attacks substructure: Tackle in slot 0 by default. The user
+     * almost certainly wants to swap this in the editor; Tackle is
+     * just a safe move that ~every species can technically have. */
+    out->a.moves[0] = 33;          /* Tackle */
+    out->a.moves[1] = 0;
+    out->a.moves[2] = 0;
+    out->a.moves[3] = 0;
+    out->a.pp[0] = 35; out->a.pp[1] = 0; out->a.pp[2] = 0; out->a.pp[3] = 0;
+
+    /* EVs: zero. Conditions: zero. */
+    memset(out->e.ev, 0, sizeof out->e.ev);
+    memset(out->e.condition, 0, sizeof out->e.condition);
+
+    /* Misc substructure: IVs = 0, no egg flag, met level 5, ball =
+     * Poké Ball (4), game = Emerald (3), OT gender = trainer's. */
+    out->m.pokerus = 0;
+    out->m.met_loc = 0xFE;  /* "Faraway place" -- PKHeX-flagged but loads */
+    /* origins bits: 0-6 met level (5), 7-10 game (3=Emerald), 11-14 ball (4),
+     * 15 ot gender (use save's gender, low bit). */
+    uint16_t met_level = 5;
+    uint16_t game      = 3; /* Emerald */
+    uint16_t ball      = 4; /* Poké Ball */
+    uint16_t otg       = (s->gender & 1) ? 1 : 0;
+    out->m.origins = (uint16_t)(met_level | (game << 7) | (ball << 11) | (otg << 15));
+    out->m.iv_egg_ability = 0; /* All IVs 0, not egg, ability slot 0 */
+    out->m.ribbons        = 0;
+
+    out->checksum_ok = true;
+    out->is_empty    = false;
+}
+
+/* Confirm + create flow. Returns true if the user committed a new
+ * Pokémon, false otherwise. On success, fills `raw_out` with the
+ * encoded 80-byte record. */
+static bool gfx_create_pokemon_flow(pb_save_t *s, uint8_t raw_out[80]) {
+    /* Step 1: warning + confirm. */
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Create new Pokemon");
+        gfx_draw_panel(60, 100, 520, 320, NULL);
+        pb_gfx_text(90, 130, PB_GFX_COLOR_TEXT_ACCENT,
+                    "Spawn a fresh Pokemon in this empty slot?");
+        pb_gfx_text(90, 170, PB_GFX_COLOR_TEXT,
+                    "You'll pick the species, then drop into the");
+        pb_gfx_text(90, 188, PB_GFX_COLOR_TEXT,
+                    "regular editor to set moves, IVs, nature,");
+        pb_gfx_text(90, 206, PB_GFX_COLOR_TEXT,
+                    "shiny, friendship, held item, etc.");
+        pb_gfx_text(90, 244, PB_GFX_COLOR_PANEL_ACCENT,
+                    "LOCAL USE ONLY (Phase 1)");
+        pb_gfx_text(90, 262, PB_GFX_COLOR_TEXT_DIM,
+                    "These will load fine in your own game, but");
+        pb_gfx_text(90, 280, PB_GFX_COLOR_TEXT_DIM,
+                    "PKHeX will mark them illegal and Pokemon HOME");
+        pb_gfx_text(90, 298, PB_GFX_COLOR_TEXT_DIM,
+                    "will quarantine them. Encounter generators come");
+        pb_gfx_text(90, 316, PB_GFX_COLOR_TEXT_DIM,
+                    "in Phase 2.");
+        gfx_draw_hint_bar("A: create   B: cancel");
+        pb_gfx_flip();
+        uint16_t b = pb_gfx_wait_button();
+        if (b & PAD_BUTTON_B) return false;
+        if (b & PAD_BUTTON_A) break;
+    }
+
+    /* Step 2: species picker. */
+    int species = gfx_pick_species(1);
+    if (species < 1) return false;
+
+    /* Step 3: build a sensible default, then drop into the editor. */
+    pb_pkm_t p;
+    build_default_pkm(&p, s, (uint16_t)species);
+
+    /* gfx_show_pkm_detail edits and re-encodes into the buffer we pass.
+     * The "edit" interaction (X to edit fields, Y to legalize, B to
+     * back) is identical to opening an existing Pokemon. If the user
+     * backs out without ever pressing X, the default still got written
+     * to raw_out, so we commit anyway -- that's the "create with no
+     * tweaks" path. */
+    pb_pkm_encode(&p, raw_out);
+    bool any_edit = gfx_show_pkm_detail(&p, raw_out, PB_FMT_PK3);
+    (void)any_edit;
+    return true;
+}
+
+/* XD/Colo variants of the create-flow. Same confirm + species picker
+ * pattern as Gen 3 above, but build the format-specific record via
+ * pb_xk3_create_default / pb_ck3_create_default and route through the
+ * editor with PB_FMT_XK3 / PB_FMT_CK3. */
+
+static bool gfx_create_xk3_flow(pb_xd_save_t *xs, uint8_t raw_out[196]) {
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Create new Pokemon (XD)");
+        gfx_draw_panel(60, 100, 520, 320, NULL);
+        pb_gfx_text(90, 130, PB_GFX_COLOR_TEXT_ACCENT,
+                    "Spawn a fresh Pokemon in this empty slot?");
+        pb_gfx_text(90, 170, PB_GFX_COLOR_TEXT,
+                    "Pick the species; defaults are level 5, Tackle,");
+        pb_gfx_text(90, 188, PB_GFX_COLOR_TEXT,
+                    "Poke Ball, friendship 70, IVs/EVs 0, no shadow.");
+        pb_gfx_text(90, 224, PB_GFX_COLOR_PANEL_ACCENT,
+                    "LOCAL USE ONLY (Phase 1)");
+        pb_gfx_text(90, 244, PB_GFX_COLOR_TEXT_DIM,
+                    "XD will load this fine. PKHeX will flag it as");
+        pb_gfx_text(90, 262, PB_GFX_COLOR_TEXT_DIM,
+                    "illegal until encounter generators ship.");
+        gfx_draw_hint_bar("A: create   B: cancel");
+        pb_gfx_flip();
+        uint16_t b = pb_gfx_wait_button();
+        if (b & PAD_BUTTON_B) return false;
+        if (b & PAD_BUTTON_A) break;
+    }
+
+    int species = gfx_pick_species(1);
+    if (species < 1) return false;
+
+    pb_xk3_create_default(raw_out, (uint16_t)species,
+                          xs->trainer_name, xs->trainer_id, xs->secret_id);
+
+    /* Route through editor for any tweaks. pb_xk3_to_pkm produces the
+     * common pb_pkm_t the editor operates on; pb_xk3_apply_pkm_edits
+     * writes any user changes back to raw_out. */
+    pb_pkm_t p;
+    pb_xk3_to_pkm(&p, raw_out);
+    bool any_edit = gfx_show_pkm_detail(&p, raw_out, PB_FMT_XK3);
+    (void)any_edit;
+    return true;
+}
+
+static bool gfx_create_ck3_flow(pb_colo_save_t *cs, uint8_t raw_out[312]) {
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Create new Pokemon (Colosseum)");
+        gfx_draw_panel(60, 100, 520, 320, NULL);
+        pb_gfx_text(90, 130, PB_GFX_COLOR_TEXT_ACCENT,
+                    "Spawn a fresh Pokemon in this empty slot?");
+        pb_gfx_text(90, 170, PB_GFX_COLOR_TEXT,
+                    "Pick the species; defaults are level 5, Tackle,");
+        pb_gfx_text(90, 188, PB_GFX_COLOR_TEXT,
+                    "Poke Ball, friendship 70, IVs/EVs 0, no shadow.");
+        pb_gfx_text(90, 224, PB_GFX_COLOR_PANEL_ACCENT,
+                    "LOCAL USE ONLY (Phase 1)");
+        pb_gfx_text(90, 244, PB_GFX_COLOR_TEXT_DIM,
+                    "Colosseum will load this fine. PKHeX will flag it");
+        pb_gfx_text(90, 262, PB_GFX_COLOR_TEXT_DIM,
+                    "as illegal until encounter generators ship.");
+        gfx_draw_hint_bar("A: create   B: cancel");
+        pb_gfx_flip();
+        uint16_t b = pb_gfx_wait_button();
+        if (b & PAD_BUTTON_B) return false;
+        if (b & PAD_BUTTON_A) break;
+    }
+
+    int species = gfx_pick_species(1);
+    if (species < 1) return false;
+
+    pb_ck3_create_default(raw_out, (uint16_t)species,
+                          cs->trainer_name, cs->trainer_id, cs->secret_id);
+
+    pb_pkm_t p;
+    pb_ck3_to_pkm(&p, raw_out);
+    bool any_edit = gfx_show_pkm_detail(&p, raw_out, PB_FMT_CK3);
+    (void)any_edit;
+    return true;
+}
+
 /* ---- Graphics-mode Gen 3 box browser ---- */
 
 static void gfx_pkm_box_screen(pb_save_t *s) {
@@ -1439,7 +1821,7 @@ static void gfx_pkm_box_screen(pb_save_t *s) {
                      iv[0], iv[1], iv[2], iv[3], iv[4], iv[5]);
             pb_gfx_text(48, 424, PB_GFX_COLOR_TEXT_DIM, ivs);
         }
-        gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open   B: back");
+        gfx_draw_hint_bar("L/R: box   D-Pad: select   A: open / create   B: back");
         pb_gfx_flip();
 
         uint16_t b = pb_gfx_wait_button();
@@ -1453,10 +1835,18 @@ static void gfx_pkm_box_screen(pb_save_t *s) {
         if (b & PAD_BUTTON_A) {
             pb_pkm_t p;
             pb_pkm_decode(&p, box_bytes + sel * PB_PKM_BOX_SIZE);
-            if (p.is_empty) continue;
-            /* Capture raw bytes locally; if edited, persist via section
-             * write helper. */
             uint8_t raw_local[80];
+            if (p.is_empty) {
+                /* Phase 1 creator: spawn a fresh Pokémon into this empty
+                 * slot. The flow does its own confirm + species pick +
+                 * editor; on commit it returns the encoded 80 bytes. */
+                if (gfx_create_pokemon_flow(s, raw_local)) {
+                    pb_save_box_write_slot(s, box, sel, raw_local);
+                }
+                continue;
+            }
+            /* Existing path: edit an occupied slot. Capture raw bytes
+             * locally; if edited, persist via section write helper. */
             memcpy(raw_local, box_bytes + sel * PB_PKM_BOX_SIZE, 80);
             if (gfx_show_pkm_detail(&p, raw_local, PB_FMT_PK3)) {
                 /* gfx_show_pkm_detail already called pb_pkm_encode into
@@ -1548,7 +1938,13 @@ static void gfx_colo_party_screen(pb_colo_save_t *cs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = cs->slot + PB_COLO_PARTY_OFF + sel * PB_COLO_PKM_SIZE;
             pb_pkm_t p; pb_ck3_to_pkm(&p, raw);
-            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
+            if (p.is_empty) {
+                uint8_t fresh[312];
+                if (gfx_create_ck3_flow(cs, fresh)) {
+                    memcpy(raw, fresh, 312);
+                    edited = true;
+                }
+            } else if (gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
                 edited = true;
             }
         }
@@ -1631,7 +2027,13 @@ static void gfx_colo_box_screen(pb_colo_save_t *cs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = cs->slot + pb_colo_box_slot_offset(cs, box, sel);
             pb_pkm_t p; pb_ck3_to_pkm(&p, raw);
-            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
+            if (p.is_empty) {
+                uint8_t fresh[312];
+                if (gfx_create_ck3_flow(cs, fresh)) {
+                    memcpy(raw, fresh, 312);
+                    edited = true;
+                }
+            } else if (gfx_show_pkm_detail(&p, raw, PB_FMT_CK3)) {
                 edited = true;
             }
         }
@@ -1729,7 +2131,13 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs) {
         if (b & PAD_BUTTON_A) {
             uint8_t *raw = xs->slot + pb_xd_box_slot_offset(xs, box, sel);
             pb_pkm_t p; pb_xk3_to_pkm(&p, raw);
-            if (!p.is_empty && gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
+            if (p.is_empty) {
+                uint8_t fresh[196];
+                if (gfx_create_xk3_flow(xs, fresh)) {
+                    memcpy(raw, fresh, 196);
+                    edited = true;
+                }
+            } else if (gfx_show_pkm_detail(&p, raw, PB_FMT_XK3)) {
                 edited = true;
             }
         }
@@ -1744,7 +2152,24 @@ static void gfx_xd_box_screen(pb_xd_save_t *xs) {
 
 void pb_ui_run_graphics_app(void) {
     if (!pb_gfx_init()) return;
-    pb_audio_init();
+    /* AESND is intentionally NOT inited here. Initializing libaesnd
+     * before the first CARD_Mount on a cold-boot EXI state causes
+     * CARD_Mount(slot A) to hang forever -- even with EXI_Unlock,
+     * EXI_Detach, EXI_ProbeReset all defensively applied. Confirmed
+     * by real-hardware test: with pb_audio_init disabled, memcard
+     * scan works from cold boot; with it enabled, it hangs.
+     *
+     * Strategy: defer AESND init until after the FIRST sub-menu
+     * action completes. By then either:
+     *   (a) the user did a memcard scan, which "warmed up" the EXI
+     *       state via EXI_Unlock+Detach+Mount, so AESND can init
+     *       without breaking subsequent scans, OR
+     *   (b) the user did a non-memcard action, and AESND coming up
+     *       after is harmless.
+     *
+     * After init, the existing pb_audio_suspend/resume already
+     * pauses music around future CARD_* operations. */
+    bool audio_armed = false;
     int sel = 0;
     static const char *items[] = {
         "Load FireRed save (demo)",
@@ -1818,6 +2243,7 @@ void pb_ui_run_graphics_app(void) {
         if (b & (PAD_BUTTON_UP | PAD_TRIGGER_L))   sel = (sel + n - 1) % n;
         if (b & (PAD_BUTTON_DOWN | PAD_TRIGGER_R)) sel = (sel + 1) % n;
         if (b & PAD_BUTTON_A) {
+            int picked = sel;
             switch (sel) {
                 case 0: {
                     static pb_save_t s;
@@ -1925,7 +2351,7 @@ void pb_ui_run_graphics_app(void) {
                                 pb_gfx_clear();
                                 gfx_draw_title_bar("Write XD save");
                                 gfx_draw_panel(60, 110, 520, 240, NULL);
-                                if (!pb_sd_available) {
+                                if (!pb_sd_try_mount()) {
                                     pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT,
                                                 "No SD card -- cannot write.");
                                     pb_gfx_text(90, 178, PB_GFX_COLOR_TEXT_DIM,
@@ -2004,7 +2430,7 @@ void pb_ui_run_graphics_app(void) {
                                 pb_gfx_clear();
                                 gfx_draw_title_bar("Write Colosseum save");
                                 gfx_draw_panel(60, 110, 520, 260, NULL);
-                                if (!pb_sd_available) {
+                                if (!pb_sd_try_mount()) {
                                     pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT,
                                                 "No SD card -- cannot write.");
                                     pb_gfx_text(90, 178, PB_GFX_COLOR_TEXT_DIM,
@@ -2250,7 +2676,7 @@ void pb_ui_run_graphics_app(void) {
                      * to parse -- if the parser rejects (uncommon but
                      * possible for weird ROM hack saves) the user can still
                      * pull the .sav from SD into PKHeX. */
-                    if (pb_sd_available) {
+                    if (pb_sd_try_mount()) {
                         mkdir("sd:/pokebridge", 0777);
                         mkdir("sd:/pokebridge/saves", 0777);
                         char rawpath[96];
@@ -2295,7 +2721,7 @@ void pb_ui_run_graphics_app(void) {
                             if (sb & PAD_BUTTON_A) {
                                 if (sub_sel == 0) gfx_pkm_party_screen(&cart_s);
                                 else if (sub_sel == 1) gfx_pkm_box_screen(&cart_s);
-                                else if (sub_sel == 2 && pb_sd_available) {
+                                else if (sub_sel == 2 && pb_sd_try_mount()) {
                                     mkdir("sd:/pokebridge", 0777);
                                     mkdir("sd:/pokebridge/saves", 0777);
                                     char savepath[64];
@@ -2321,15 +2747,15 @@ void pb_ui_run_graphics_app(void) {
                     /* SD save picker */
                     char paths[16][256];
                     int found = 0;
-                    if (pb_sd_available) {
+                    if (pb_sd_try_mount()) {
                         found = list_saves(paths, 16);
                     }
-                    if (!pb_sd_available || found == 0) {
+                    if (!pb_sd_try_mount() || found == 0) {
                         for (;;) {
                             pb_gfx_clear();
                             gfx_draw_title_bar("SD card");
                             gfx_draw_panel(60, 110, 520, 240, NULL);
-                            if (!pb_sd_available) {
+                            if (!pb_sd_try_mount()) {
                                 pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT, "No SD card detected.");
                                 pb_gfx_text(90, 174, PB_GFX_COLOR_TEXT_DIM, "Dolphin: no GameCube SD emulation in this build.");
                                 pb_gfx_text(90, 192, PB_GFX_COLOR_TEXT_DIM, "Real hardware: insert an SD card and reboot via Swiss.");
@@ -2406,9 +2832,50 @@ void pb_ui_run_graphics_app(void) {
                     break;
                 }
                 case 6: {
-                    /* Scan GameCube memory card slots A + B. */
+                    /* Scan GameCube memory card slots A + B.
+                     *
+                     * CRITICAL: libfat (mounted at boot via fatInitDefault)
+                     * holds an EXI channel for the SD adapter. If the SD
+                     * is in the same slot we're trying to CARD_Mount,
+                     * libcard deadlocks waiting on EXI_Lock. GCMM avoids
+                     * this by mounting FAT lazily; we mount eagerly so
+                     * the rest of the app can write back .sav / .gci /
+                     * .pk3 files. Workaround: unmount FAT just for the
+                     * scan, remount after.
+                     *
+                     * Per-slot feedback so the user can see WHERE it
+                     * hangs if there's still a problem after the unmount. */
                     pb_card_entry_t cards[PB_CARD_MAX_ENTRIES];
-                    int n_cards = pb_card_scan(cards, PB_CARD_MAX_ENTRIES);
+                    int n_cards = 0;
+
+                    /* Render: "Scanning slot A..." */
+                    pb_gfx_clear();
+                    gfx_draw_title_bar("Memory card scan");
+                    gfx_draw_panel(60, 150, 520, 200, NULL);
+                    pb_gfx_text(90, 190, PB_GFX_COLOR_TEXT_ACCENT,
+                                "Scanning slot A...");
+                    pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT_DIM,
+                                "FAT temporarily unmounted to free EXI.");
+                    pb_gfx_text(90, 240, PB_GFX_COLOR_TEXT_DIM,
+                                "If this freezes, slot A is the issue.");
+                    pb_gfx_flip();
+                    n_cards += pb_card_scan_slot(CARD_SLOTA, cards,
+                                                 PB_CARD_MAX_ENTRIES, n_cards);
+
+                    /* Render: "Scanning slot B..." */
+                    pb_gfx_clear();
+                    gfx_draw_title_bar("Memory card scan");
+                    gfx_draw_panel(60, 150, 520, 200, NULL);
+                    pb_gfx_text(90, 190, PB_GFX_COLOR_TEXT_ACCENT,
+                                "Scanning slot B...");
+                    char dbg[64];
+                    snprintf(dbg, sizeof dbg, "Slot A returned %d save(s).", n_cards);
+                    pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT_DIM, dbg);
+                    pb_gfx_text(90, 240, PB_GFX_COLOR_TEXT_DIM,
+                                "If this freezes here, slot B is the issue.");
+                    pb_gfx_flip();
+                    n_cards += pb_card_scan_slot(CARD_SLOTB, cards,
+                                                 PB_CARD_MAX_ENTRIES, n_cards);
                     if (n_cards <= 0) {
                         for (;;) {
                             pb_gfx_clear();
@@ -2757,6 +3224,15 @@ void pb_ui_run_graphics_app(void) {
                     }
                     break;
                 }
+            }
+            /* First time we return from a submenu, arm AESND. By now
+             * EXI is in a known state -- if it was a memcard scan,
+             * EXI got the Unlock+Detach+Mount sequence (which warms
+             * it up the same way GCMM does); if it was a non-memcard
+             * action, AESND init is harmless. */
+            if (!audio_armed && picked != 9) {
+                pb_audio_init();
+                audio_armed = true;
             }
         }
     }

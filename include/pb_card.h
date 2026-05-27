@@ -49,6 +49,13 @@ typedef struct {
  * unformatted are silently skipped. */
 int pb_card_scan(pb_card_entry_t *out, int max);
 
+/* Single-slot scan -- exposed so the UI can render "Scanning slot X..."
+ * progress feedback between slots (and so the user can see WHICH slot
+ * hangs if CARD_Mount deadlocks). `existing_count` is the number of
+ * entries already in `out` from previous scans; new entries are
+ * appended starting at out[existing_count]. Returns count appended. */
+int pb_card_scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count);
+
 /* Diagnostic info from the last read attempt -- populated even on
  * failure so the UI can report exactly where things went wrong. */
 typedef enum {

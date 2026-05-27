@@ -119,6 +119,25 @@ void pb_xk3_to_pkm(pb_pkm_t *out, const uint8_t *raw196);
  * stats, etc.) so we don't corrupt anything we don't understand. */
 void pb_xk3_apply_pkm_edits(const pb_pkm_t *p, uint8_t *raw196);
 
+/* Build a fresh 196-byte XK3 record from scratch with sensible defaults
+ * (level 5, Tackle, Poké Ball, no shadow, friendship 70, all IVs 0).
+ * Used when the user creates a new Pokémon in an empty XD party/box
+ * slot. Caller is responsible for: (a) re-running pb_xk3_to_pkm if it
+ * wants to push the result through the regular editor, and (b) calling
+ * pb_xd_finalize_slot before writing the save back so checksums match.
+ *
+ * `species_natdex` is the national-dex ID (1..386). We map to XD's
+ * internal species ID via the same Table3NationalToInternal that
+ * Colosseum uses. trainer_name_gen3 is an ASCII string up to 10 chars;
+ * we encode it into XD's UTF-16 BE 22-byte name slot. */
+void pb_xk3_create_default(uint8_t raw_out[196], uint16_t species_natdex,
+                            const char *trainer_name_gen3,
+                            uint16_t tid, uint16_t sid);
+
+/* Map a national-dex species ID to XD/Colo's internal ID. Identity
+ * for 1..251; uses Table3NationalToInternal offsets for 252+. */
+uint16_t pb_natdex_to_internal3(uint16_t natdex);
+
 /* Box geometry: 30 mons per box, 8 boxes total in XD. */
 #define PB_XD_BOX_COUNT       8
 #define PB_XD_BOX_SIZE        30

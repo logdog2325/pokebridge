@@ -4,8 +4,65 @@
 #include <ogc/exi.h>
 #include <ogc/system.h>
 #include <ogc/video.h>
+#include <fat.h>
 #include <malloc.h>
+#include <stdbool.h>
 #include <string.h>
+
+/* Cold-boot CARD_Mount hang fix (the GCMM-vs-PokeBridge difference):
+ *
+ * fatInitDefault() at boot causes libfat's __io_gcsda backend to call
+ * EXI_Lock(ch0) since the SD adapter shares EXI channel 0 with memcard
+ * slot A (and channel 1 with slot B for slot-B SD adapters). When
+ * fatUnmount() releases the FAT layer, __io_gcsda does NOT release the
+ * EXI lock -- not part of libfat's contract. EXI_ProbeReset doesn't
+ * clear EXI_FLAG_LOCKED either. So CARD_Mount's internal EXI_Lock
+ * call silently fails, the mount state machine never advances, the
+ * EXI IRQ never fires, and LWP_ThreadSleep blocks forever.
+ *
+ * The trick GCMM gets for free: it doesn't call fatInitDefault at
+ * boot, so EXI is never locked in the first place. Swiss's reload
+ * stub also re-zeros EXI on .dol transitions, which is why
+ * GCMM-then-PokéBridge works.
+ *
+ * Our fix: force-release EXI locks + detach devices BEFORE every
+ * CARD_* operation, then re-fatInitDefault after. This mimics what
+ * Swiss's reload stub does manually. */
+extern bool pb_sd_available;
+static bool s_fat_was_unmounted = false;
+
+static void pb_fat_release_for_card(void) {
+    /* 1. Tear down the FAT layer. */
+    if (pb_sd_available && !s_fat_was_unmounted) {
+        fatUnmount("sd");
+        s_fat_was_unmounted = true;
+    }
+
+    /* 2. Drain any EXI locks libfat's disc backend may have left.
+     *    EXI_Unlock returns 1 while there are queued waiters / held
+     *    locks on the channel; loop until 0. */
+    for (int chn = 0; chn < 2; chn++) {
+        int drain = 0;
+        while (EXI_Unlock(chn) == 1 && drain++ < 16) { /* drain */ }
+    }
+
+    /* 3. Detach the SD device from each channel. This is what
+     *    __exi_init does at libogc startup, but it never runs again
+     *    after fatInitDefault has attached __io_gcsda. */
+    EXI_Detach(EXI_CHANNEL_0);
+    EXI_Detach(EXI_CHANNEL_1);
+
+    /* 4. Settle delay -- EXI debounce is ~30us per __exi_probe; give
+     *    the bus ~500ms to come back to idle before CARD_Mount tries. */
+    for (int i = 0; i < 30; i++) VIDEO_WaitVSync();
+}
+
+static void pb_fat_reacquire_after_card(void) {
+    if (s_fat_was_unmounted) {
+        fatInitDefault();
+        s_fat_was_unmounted = false;
+    }
+}
 
 /* Workarea for card operations -- must be 32-byte aligned and at least
  * CARD_WORKAREA_SIZE bytes per active mount. We share one across both
@@ -18,15 +75,13 @@ static uint8_t s_workarea[CARD_WORKAREA_SIZE] __attribute__((aligned(32)));
 /* Mount the given slot with GCMM's defensive retry pattern:
  *   - EXI_ProbeReset() before each attempt clears stale EXI channel
  *     state from whatever .dol ran before us (Swiss, IPL, prior app).
- *     Without this, the controller can be stuck mid-transaction and
- *     CARD_Mount blocks forever on an IRQ that never fires.
- *   - CARD_Init(NULL, NULL) per attempt (NULL = "see all gamecodes"
- *     during scan; the read/write path resets gamecode + company to
- *     the file's own values before CARD_Open).
- *   - Up to 10 retries with VSync waits in between, since real cards
- *     genuinely miss the first 1-2 probes on some hardware.
- *
- * Lifted from suloku's GCMM mcard.c MountCard(). */
+ *   - CARD_Init(NULL, NULL) per attempt (NULL = "see all gamecodes").
+ *   - CARD_Probe BEFORE CARD_Mount -- non-blocking check that returns
+ *     immediately if no card is inserted. Without this, CARD_Mount
+ *     can block indefinitely waiting on a card-extraction IRQ that
+ *     never fires when there's no card to extract.
+ *   - Up to 10 retries with VSync waits between, since real cards
+ *     genuinely miss the first 1-2 probes on some hardware. */
 static int pb_card_mount_retry(int slot) {
     int ret = -1;
     for (int tries = 0; tries < 10 && ret < 0; tries++) {
@@ -34,6 +89,18 @@ static int pb_card_mount_retry(int slot) {
         CARD_Init(NULL, NULL);
         CARD_SetCompany(NULL);
         CARD_SetGamecode(NULL);
+
+        /* Quick check first. CARD_Probe returns: positive if card
+         * present, 0 if no card, negative on EXI error. If no card,
+         * return early -- attempting CARD_Mount on an empty slot
+         * blocks indefinitely. */
+        s32 probed = CARD_Probe(slot);
+        if (probed <= 0) {
+            ret = -3;  /* CARD_ERROR_NOCARD-ish; tells caller to skip slot */
+            VIDEO_WaitVSync();
+            continue;
+        }
+
         ret = CARD_Mount(slot, s_workarea, NULL);
         if (ret >= 0) break;
         VIDEO_WaitVSync();
@@ -102,15 +169,25 @@ static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count
     return found;
 }
 
-int pb_card_scan(pb_card_entry_t *out, int max) {
-    /* Pause libaesnd just in case (cheap insurance against DSP IRQ
-     * starving EXI completion, even though libaesnd's design should
-     * already avoid this). The real fix is EXI_ProbeReset() inside
-     * pb_card_mount_retry. */
+int pb_card_scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count) {
     pb_audio_suspend();
+    pb_fat_release_for_card();
+    int n = scan_slot(slot, out, max, existing_count);
+    pb_fat_reacquire_after_card();
+    pb_audio_resume();
+    return n;
+}
+
+int pb_card_scan(pb_card_entry_t *out, int max) {
+    /* Batch both slots inside ONE FAT unmount/remount cycle to avoid
+     * remounting between scans -- the SD adapter takes a noticeable
+     * fraction of a second to re-initialize. */
+    pb_audio_suspend();
+    pb_fat_release_for_card();
     int total = 0;
     total += scan_slot(CARD_SLOTA, out, max, total);
     total += scan_slot(CARD_SLOTB, out, max, total);
+    pb_fat_reacquire_after_card();
     pb_audio_resume();
     return total;
 }
@@ -301,12 +378,16 @@ static size_t do_card_write(const pb_card_entry_t *entry, const uint8_t *buf,
     return written;
 }
 
-/* Public wrappers: bracket each libcard call with pb_audio_suspend so
- * the EXI completion IRQs aren't starved by libasnd's DSP IRQ. */
+/* Public wrappers: bracket each libcard call with audio suspend (EXI
+ * IRQ priority) AND libfat unmount (EXI channel ownership). Without
+ * the unmount, CARD_Mount on the slot that holds the SD adapter
+ * deadlocks on EXI_Lock forever. */
 size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
                          size_t max_bytes, pb_card_read_status_t *status) {
     pb_audio_suspend();
+    pb_fat_release_for_card();
     size_t r = do_card_read(entry, out_buf, max_bytes, status);
+    pb_fat_reacquire_after_card();
     pb_audio_resume();
     return r;
 }
@@ -314,7 +395,9 @@ size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
 size_t pb_card_write_file(const pb_card_entry_t *entry, const uint8_t *buf,
                           size_t len, pb_card_read_status_t *status) {
     pb_audio_suspend();
+    pb_fat_release_for_card();
     size_t r = do_card_write(entry, buf, len, status);
+    pb_fat_reacquire_after_card();
     pb_audio_resume();
     return r;
 }

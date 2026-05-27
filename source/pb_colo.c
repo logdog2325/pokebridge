@@ -173,6 +173,61 @@ bool pb_colo_write_file(pb_colo_save_t *cs, const char *path) {
     return n == PB_COLO_SAVE_SIZE;
 }
 
+/* Encode an ASCII name into Colo's UTF-16 BE 22-byte buffer (10 chars +
+ * NUL terminator). Same encoding XD uses. */
+static void enc_colo_name(uint8_t *dst22, const char *ascii) {
+    memset(dst22, 0, 22);
+    if (!ascii) return;
+    for (int i = 0; i < 10 && ascii[i]; i++) {
+        dst22[i * 2]     = 0x00;
+        dst22[i * 2 + 1] = (uint8_t)ascii[i];
+    }
+}
+
+void pb_ck3_create_default(uint8_t r[312], uint16_t species_natdex,
+                           const char *trainer_name_gen3,
+                           uint16_t tid, uint16_t sid) {
+    /* Map natdex -> XD/Colo internal ID. The XK3 implementation owns
+     * the table; pull in the public declaration. */
+    extern uint16_t pb_natdex_to_internal3(uint16_t natdex);
+
+    memset(r, 0, 312);
+
+    wr_u16be(r + 0x00, pb_natdex_to_internal3(species_natdex));
+    uint32_t pid = ((uint32_t)tid << 16) | (uint32_t)(sid ^ species_natdex ^ 0xA53Cu);
+    if (pid == 0) pid = 0x12345678u;
+    wr_u32be(r + 0x04, pid);
+    r[0x08] = 1;                             /* GCVersion: Ruby */
+    r[0x09] = 1;                             /* CurrentRegion: NTSC-U */
+    r[0x0A] = 1;                             /* OriginalRegion */
+    r[0x0B] = 2;                             /* Language: English */
+    /* 0x0C met_location u16 = 0 */
+    r[0x0E] = 5;                             /* met level */
+    r[0x0F] = 4;                             /* Poke Ball */
+    r[0x10] = 0;                             /* OT gender male */
+    wr_u16be(r + 0x14, sid);
+    wr_u16be(r + 0x16, tid);
+    enc_colo_name(r + 0x18, trainer_name_gen3);
+    /* Auto-nickname = species name (matches what Colosseum does for
+     * newly caught mons). */
+    const char *nick = pb_species_name(species_natdex);
+    enc_colo_name(r + 0x2E, nick);           /* nickname display */
+    enc_colo_name(r + 0x44, nick);           /* nickname */
+    wr_u32be(r + 0x5C, 135);                 /* EXP @ L5 medium-fast */
+    r[0x60] = 5;                             /* level */
+    wr_u16be(r + 0x78, 33);                  /* Move 1 = Tackle */
+    r[0x7A] = 35;                            /* PP */
+    r[0x7B] = 0;                             /* PP-Ups */
+    /* Moves 2..4 zero. */
+    /* 0x88 held_item = 0 */
+    wr_u16be(r + 0x8A, 20);                  /* HPcurrent placeholder */
+    /* EVs (0x98..) and IVs (0xA4..) all zero. */
+    wr_u16be(r + 0xB0, 70);                  /* friendship */
+    r[0xCD] = 0;                             /* Valid: 0 = valid */
+    /* 0xD8 ShadowID = 0 (not shadow). */
+    /* 0xDC Purification gauge = 0 (irrelevant when not shadow). */
+}
+
 uint32_t pb_colo_box_slot_offset(const pb_colo_save_t *cs, int box_index, int slot) {
     if (!cs || box_index < 0 || box_index >= PB_COLO_BOX_COUNT) return 0;
     if (slot < 0 || slot >= PB_COLO_BOX_SIZE) return 0;

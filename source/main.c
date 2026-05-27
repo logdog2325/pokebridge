@@ -19,8 +19,10 @@ int main(int argc, char **argv) {
     /* PAD needs initialization before SDL2 takes the framebuffer. */
     PAD_Init();
 
-    /* Try SD silently in the background; if it works we'll show user-facing
-     * saves on the menu later. */
+    /* Restored: Swiss apparently expects our .dol to grab the SD
+     * interface during boot; skipping fatInitDefault caused the
+     * app not to launch at all (black screen). Init it eagerly
+     * again. The cold-boot scan freeze is somewhere else. */
     pb_sd_available = fatInitDefault();
 
     /* Boot straight into the graphics app (no libogc console screens). */
