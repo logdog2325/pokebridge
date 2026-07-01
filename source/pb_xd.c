@@ -329,7 +329,14 @@ void pb_xk3_create_default(uint8_t r[196], uint16_t species_natdex,
                            uint16_t tid, uint16_t sid) {
     memset(r, 0, 196);
 
-    wr_u16be(r + 0x00, pb_natdex_to_internal3(species_natdex));
+    /* Species: write natdex directly. Colosseum was confirmed to read
+     * the species field as natdex (user picked Grovyle #253, saw
+     * Wingull #278 -- exactly the Table3NationalToInternal offset
+     * applied wrongly). Our decoders (pb_colo_pkm_decode line 323,
+     * pb_xd_species_to_natdex) are both natdex-passthroughs, so
+     * writing natdex directly matches the round-trip and matches the
+     * game's actual behavior. */
+    wr_u16be(r + 0x00, species_natdex);
     /* 0x02 held_item = 0 */
     wr_u16be(r + 0x04, 20);                  /* HP current placeholder */
     wr_u16be(r + 0x06, 70);                  /* friendship (low byte) */
@@ -376,6 +383,19 @@ void pb_xk3_set_nickname(uint8_t *raw196, const char *ascii) {
     if (!raw196 || !ascii) return;
     enc_gc_name(raw196 + 0x4E, ascii);
     enc_gc_name(raw196 + 0x64, ascii);
+}
+
+/* Set the stored level + EXP on an XK3 record.
+ * Level byte at 0x11, EXP u32 BE at 0x20. The game recomputes stats
+ * on next heal, but both fields need to match so the game doesn't
+ * detect a mismatch. */
+void pb_xk3_set_level_exp(uint8_t *raw196, uint8_t level, uint32_t exp) {
+    if (!raw196) return;
+    raw196[0x11] = level;
+    raw196[0x20] = (uint8_t)(exp >> 24);
+    raw196[0x21] = (uint8_t)(exp >> 16);
+    raw196[0x22] = (uint8_t)(exp >> 8);
+    raw196[0x23] = (uint8_t)(exp & 0xFF);
 }
 
 bool pb_xd_write_file(pb_xd_save_t *xs, const char *path) {

@@ -142,3 +142,39 @@ void pb_audio_resume(void) {
     if (!s_inited) return;
     if (s_suspend_depth > 0 && --s_suspend_depth == 0) AESND_Pause(false);
 }
+
+/* Full AESND teardown for use around libcard operations.
+ *
+ * Why this exists: Pokemon-format memory cards are LOCKED per power
+ * cycle, and CARD_Mount unlocks them by scheduling a DSP task at
+ * priority 255. libaesnd's mixer runs a persistent DSP task ALSO at
+ * priority 255. In libogc's DSP task queue (libogc/dsp.c
+ * __dsp_inserttask), same-priority tasks queue at the TAIL, and
+ * DSP_AddTask only boots a task if it's already at head. So once
+ * AESND is running, the card unlock task queues behind it and never
+ * boots -- CARD_Mount then blocks in LWP_ThreadSleep forever.
+ *
+ * AESND_Pause(true) is not enough: it only sets a "skip mixing" flag
+ * inside the audio DMA callback; the DSP task keeps running and
+ * keeps holding the queue-head. Only AESND_Reset (which sends the
+ * 0xfacedead shutdown mail to the DSP binary) actually removes
+ * __aesnddsptask from the queue.
+ *
+ * Cost: audio silence for ~2-3 seconds around each card op, plus
+ * ~50ms DSP task reload on the way back. Acceptable price for
+ * "memcard scan actually works after SD operations". */
+void pb_audio_hard_teardown_for_card(void) {
+    if (!s_inited) return;
+    if (s_voice) {
+        AESND_SetVoiceStop(s_voice, true);
+        AESND_FreeVoice(s_voice);
+        s_voice = NULL;
+    }
+    AESND_Reset();       /* This is the critical step */
+    s_inited = false;    /* Force pb_audio_init to fully rebuild. */
+}
+
+void pb_audio_rebuild_after_card(void) {
+    if (s_inited) return;
+    pb_audio_init();     /* Re-inits AESND, re-allocates voice, restarts music. */
+}

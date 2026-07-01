@@ -147,8 +147,16 @@ void pb_colo_finalize_slot(pb_colo_save_t *cs) {
     uint8_t *slot = cs->slot;
     /* Clear header checksum field at 0x0C before recomputing. */
     wr_u32be(slot + 0x0C, 0);
-    /* Body checksum: SHA-1 of bytes [0, end - 20]; store at last 20 bytes. */
-    pb_sha1(slot + PB_COLO_SLOT_SIZE - 20, slot, PB_COLO_SLOT_SIZE - 20);
+    /* Body SHA-1 stored at last 20 bytes. CRITICAL: the SHA-1 INPUT
+     * excludes the last 40 bytes -- 20 for the SHA-1 storage itself
+     * plus an unused 20-byte block that Colosseum specifically leaves
+     * out of body-checksum validation. Was previously - 20; that
+     * mismatch is exactly why v0.6.1's Colo writes were producing
+     * saves the game rejected on load ("error reading save file")
+     * even though our self-verify re-parse passed. See PKHeX
+     * ColoCrypto.SetChecksums line 134: hash range is
+     * data[..^(2 * sha1HashSize)] i.e. [0, SLOT_SIZE - 40). */
+    pb_sha1(slot + PB_COLO_SLOT_SIZE - 20, slot, PB_COLO_SLOT_SIZE - 40);
     /* Header checksum: -sum + xor formula. */
     int32_t hc = compute_header_checksum(slot, slot + PB_COLO_SLOT_SIZE - 20);
     wr_u32be(slot + 0x0C, (uint32_t)hc);
@@ -187,13 +195,14 @@ static void enc_colo_name(uint8_t *dst22, const char *ascii) {
 void pb_ck3_create_default(uint8_t r[312], uint16_t species_natdex,
                            const char *trainer_name_gen3,
                            uint16_t tid, uint16_t sid) {
-    /* Map natdex -> XD/Colo internal ID. The XK3 implementation owns
-     * the table; pull in the public declaration. */
-    extern uint16_t pb_natdex_to_internal3(uint16_t natdex);
-
     memset(r, 0, 312);
 
-    wr_u16be(r + 0x00, pb_natdex_to_internal3(species_natdex));
+    /* Species: write natdex directly. Colosseum reads the species
+     * field as natdex (confirmed on real hardware -- spawning natdex
+     * 253 was displayed as natdex 278 when we applied the XD offset
+     * table, i.e. Grovyle came out as Wingull). Our decoder does the
+     * same passthrough on read (pb_colo_pkm_decode line 323). */
+    wr_u16be(r + 0x00, species_natdex);
     uint32_t pid = ((uint32_t)tid << 16) | (uint32_t)(sid ^ species_natdex ^ 0xA53Cu);
     if (pid == 0) pid = 0x12345678u;
     wr_u32be(r + 0x04, pid);
@@ -235,6 +244,17 @@ void pb_ck3_set_nickname(uint8_t *raw312, const char *ascii) {
     if (!raw312 || !ascii) return;
     enc_colo_name(raw312 + 0x2E, ascii);
     enc_colo_name(raw312 + 0x44, ascii);
+}
+
+/* Set the stored level + EXP on a CK3 record.
+ * EXP u32 BE at 0x5C, level byte at 0x60. */
+void pb_ck3_set_level_exp(uint8_t *raw312, uint8_t level, uint32_t exp) {
+    if (!raw312) return;
+    raw312[0x5C] = (uint8_t)(exp >> 24);
+    raw312[0x5D] = (uint8_t)(exp >> 16);
+    raw312[0x5E] = (uint8_t)(exp >> 8);
+    raw312[0x5F] = (uint8_t)(exp & 0xFF);
+    raw312[0x60] = level;
 }
 
 uint32_t pb_colo_box_slot_offset(const pb_colo_save_t *cs, int box_index, int slot) {

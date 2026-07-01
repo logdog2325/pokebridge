@@ -46,6 +46,12 @@ tools/test_sha1
 tools/gen-test-save/bin/
 tools/gen-test-save/obj/
 
+# Vendored pokeemerald data files used by the learnset + growth-rate
+# generators. Not our code (GPL-3.0 upstream) -- users run the
+# generator scripts to regenerate include/learnsets_gen3.h and
+# include/growth_rates_gen3.h.
+tools/learnset_gen/
+
 # Editor + OS junk
 .DS_Store
 *.swp

@@ -143,6 +143,11 @@ uint16_t pb_natdex_to_internal3(uint16_t natdex);
  * Callers should re-run pb_xd_finalize_slot before writing back. */
 void pb_xk3_set_nickname(uint8_t *raw196, const char *ascii);
 
+/* Set the level (byte at 0x11) and EXP (u32 BE at 0x20) on an XK3
+ * record. Caller should compute EXP for the target level via
+ * pb_exp_for_level(species, level) beforehand. */
+void pb_xk3_set_level_exp(uint8_t *raw196, uint8_t level, uint32_t exp);
+
 /* Box geometry: 30 mons per box, 8 boxes total in XD. */
 #define PB_XD_BOX_COUNT       8
 #define PB_XD_BOX_SIZE        30

@@ -102,6 +102,24 @@ const char *pb_move_name(uint16_t move_id);
  * that don't make sense to hold). */
 const char *pb_item_name(uint16_t item_id);
 
+/* Returns true if `species` (natdex 1..386) can legally learn `move_id`
+ * (Gen 3 move 1..354) via level-up or TM/HM. Data extracted from
+ * pret/pokeemerald master. Fails OPEN for species we don't have data
+ * for (a few alternate-form edge cases) so the user isn't locked out. */
+bool pb_species_can_learn_move(uint16_t species, uint16_t move_id);
+
+/* Minimum EXP to reach `level` for the species's growth rate group.
+ * Per-species growth rate table extracted from pokeemerald. Six formula
+ * variants (Medium Fast, Erratic, Fluctuating, Medium Slow, Fast, Slow)
+ * verified against Bulbapedia. Species without data default to Medium
+ * Fast (L^3). Level clamped to [1..100]. */
+uint32_t pb_exp_for_level(uint16_t species, int level);
+uint32_t pb_exp_for_level_by_growth(int level, uint8_t growth_rate);
+int      pb_level_for_exp(uint16_t species, uint32_t exp);
+
+/* Growth rate group for a species (0..5, see pokemon.c). */
+uint8_t  pb_growth_rate_for(uint16_t species);
+
 /* --- Editor helpers --- */
 
 /* Get/set one IV (0..5 = HP, Atk, Def, Spe, SpA, SpD). Values clamp to [0,31]. */

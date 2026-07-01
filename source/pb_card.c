@@ -2,23 +2,12 @@
 #include "pb_audio.h"
 #include <ogc/card.h>
 #include <ogc/exi.h>
-#include <ogc/irq.h>
 #include <ogc/system.h>
 #include <ogc/video.h>
-#include <sdcard/card_cmn.h> /* MAX_DRIVE -- must precede card_io.h */
-#include <sdcard/card_io.h>  /* sdgecko_doUnmount */
 #include <fat.h>
 #include <malloc.h>
 #include <stdbool.h>
 #include <string.h>
-
-/* IRQ_EXI0_EXI mask bit (PPC bit-numbering, MSB=0). libogc's
- * __exi_setinterrupts(EXI_CHANNEL_2) masks this on every chn-2 unlock
- * and only unmasks again if a debugger is attached -- which kills the
- * second CARD_Mount because libcard's state machine waits on this IRQ.
- * The right fix is to manually re-unmask before each memcard op. */
-extern void __UnmaskIrq(u32 nMask);
-#define PB_IM_EXI0_EXI (1u << (31 - IRQ_EXI0_EXI))
 
 /* Cold-boot CARD_Mount hang fix (the GCMM-vs-PokeBridge difference):
  *
@@ -43,56 +32,33 @@ extern bool pb_sd_available;
 static bool s_fat_was_unmounted = false;
 
 static void pb_fat_release_for_card(void) {
-    /* The actual mechanic of why first-scan-works / second-scan-freezes
-     * was deeper than libfat just holding a lock. Diagnosed via libogc
-     * source dive:
+    /* Actual root cause of the "second scan freezes" bug turned out to
+     * be DSP task priority contention, NOT FAT / EXI lock state:
      *
-     *   1. "sd" volume maps to __io_gcsd2 which is SD2SP2 on EXI
-     *      channel 2 (NOT channel 0/1).
-     *   2. libogc's __exi_setinterrupts(EXI_CHANNEL_2) MASKS the
-     *      channel 0 EXI IRQ on every chn-2 unlock, and only re-
-     *      unmasks if a debugger is attached.
-     *   3. CARD_Mount's state machine sleeps on the channel 0 EXI IRQ
-     *      via LWP_ThreadSleep -> never wakes -> freezes.
+     *   1. Pokemon memcards are LOCKED per power-cycle; CARD_Mount
+     *      unlocks via a DSP task at priority 255.
+     *   2. libaesnd's mixer holds a persistent DSP task ALSO at prio
+     *      255. libogc's dsp.c __dsp_inserttask queues same-priority
+     *      tasks at the tail, and DSP_AddTask only boots the new
+     *      task if it's already the head. So the card-unlock task
+     *      queues behind AESND and never runs.
+     *   3. CARD_Mount then blocks in LWP_ThreadSleep forever.
      *
-     * The proper sequence is therefore:
-     *   - fatUnmount the FAT layer
-     *   - sdgecko_doUnmount each drive so libfat's disc backend
-     *     actually releases its state (fatUnmount alone doesn't)
-     *   - Drain EXI locks on all THREE channels (0, 1, AND 2 -- we
-     *     used to skip 2)
-     *   - Re-unmask IRQ_EXI0_EXI which the chn-2 unlock masked
-     *   - EXI_ProbeReset for chn-0/1 ID lookups
-     *   - Brief settle
-     */
+     * The audio side handles this via pb_audio_hard_teardown_for_card
+     * (called by our public wrappers below), which fully removes the
+     * AESND DSP task via AESND_Reset.
+     *
+     * For FAT: the simpler dance GCMM/Swiss use is enough. Unmount,
+     * probe reset, brief settle, remount after. Prior code had a full
+     * sdgecko_doUnmount + EXI_Unlock drain + __UnmaskIrq + 500ms
+     * settle sequence based on a wrong theory; none of it helped and
+     * some of it (the manual unmask) was silently undone by
+     * EXI_ProbeReset immediately after. Simpler is better. */
     if (pb_sd_available && !s_fat_was_unmounted) {
         fatUnmount("sd");
         s_fat_was_unmounted = true;
     }
-
-    /* Tell each sdgecko disc backend to drop its internal state.
-     * drv_no 0/1 are slot A/B SD-Gecko, drv_no 2 is SD2SP2.
-     * Call all three -- no-ops for uninitialized drives. */
-    sdgecko_doUnmount(0);
-    sdgecko_doUnmount(1);
-    sdgecko_doUnmount(2);
-
-    /* Drain EXI lock waiters on every channel. */
-    for (int chn = 0; chn < 3; chn++) {
-        int drain = 0;
-        while (EXI_Unlock(chn) == 1 && drain++ < 16) { /* drain */ }
-    }
-
-    /* THE KEY FIX: re-unmask IRQ_EXI0_EXI. Without this, CARD_Mount
-     * blocks forever because the IRQ that was supposed to wake its
-     * LWP wait queue is masked. */
-    __UnmaskIrq(PB_IM_EXI0_EXI);
-
-    /* Reset EXI probe state. */
     EXI_ProbeReset();
-
-    /* Brief settle. 2 vsyncs is enough now that we're cleaning up
-     * properly -- the old 30-vsync wait was masking incomplete cleanup. */
     VIDEO_WaitVSync();
     VIDEO_WaitVSync();
 }
@@ -210,11 +176,11 @@ static int scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count
 }
 
 int pb_card_scan_slot(int slot, pb_card_entry_t *out, int max, int existing_count) {
-    pb_audio_suspend();
+    pb_audio_hard_teardown_for_card();
     pb_fat_release_for_card();
     int n = scan_slot(slot, out, max, existing_count);
     pb_fat_reacquire_after_card();
-    pb_audio_resume();
+    pb_audio_rebuild_after_card();
     return n;
 }
 
@@ -222,13 +188,13 @@ int pb_card_scan(pb_card_entry_t *out, int max) {
     /* Batch both slots inside ONE FAT unmount/remount cycle to avoid
      * remounting between scans -- the SD adapter takes a noticeable
      * fraction of a second to re-initialize. */
-    pb_audio_suspend();
+    pb_audio_hard_teardown_for_card();
     pb_fat_release_for_card();
     int total = 0;
     total += scan_slot(CARD_SLOTA, out, max, total);
     total += scan_slot(CARD_SLOTB, out, max, total);
     pb_fat_reacquire_after_card();
-    pb_audio_resume();
+    pb_audio_rebuild_after_card();
     return total;
 }
 
@@ -424,20 +390,20 @@ static size_t do_card_write(const pb_card_entry_t *entry, const uint8_t *buf,
  * deadlocks on EXI_Lock forever. */
 size_t pb_card_read_file(const pb_card_entry_t *entry, uint8_t *out_buf,
                          size_t max_bytes, pb_card_read_status_t *status) {
-    pb_audio_suspend();
+    pb_audio_hard_teardown_for_card();
     pb_fat_release_for_card();
     size_t r = do_card_read(entry, out_buf, max_bytes, status);
     pb_fat_reacquire_after_card();
-    pb_audio_resume();
+    pb_audio_rebuild_after_card();
     return r;
 }
 
 size_t pb_card_write_file(const pb_card_entry_t *entry, const uint8_t *buf,
                           size_t len, pb_card_read_status_t *status) {
-    pb_audio_suspend();
+    pb_audio_hard_teardown_for_card();
     pb_fat_release_for_card();
     size_t r = do_card_write(entry, buf, len, status);
     pb_fat_reacquire_after_card();
-    pb_audio_resume();
+    pb_audio_rebuild_after_card();
     return r;
 }

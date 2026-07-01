@@ -230,6 +230,77 @@ const char *pb_move_name(uint16_t move_id) {
     return "???";
 }
 
+#include "growth_rates_gen3.h"
+
+/* Minimum EXP to reach `level` for a given growth-rate group. Formulas
+ * verified against pokeemerald + Bulbapedia. Returns 0 for level 1. */
+uint32_t pb_exp_for_level_by_growth(int level, uint8_t growth_rate) {
+    if (level <= 1) return 0;
+    if (level > 100) level = 100;
+    long L = level;
+    long L3 = L * L * L;
+    long exp = 0;
+    switch (growth_rate) {
+    default: /* fall through to MEDIUM_FAST */
+    case 0: /* MEDIUM_FAST */
+        exp = L3;
+        break;
+    case 1: /* ERRATIC */
+        if (level <= 50)      exp = (L3 * (100 - L)) / 50;
+        else if (level <= 68) exp = (L3 * (150 - L)) / 100;
+        else if (level <= 98) exp = (L3 * ((1911 - 10 * L) / 3)) / 500;
+        else                  exp = (L3 * (160 - L)) / 100;
+        break;
+    case 2: /* FLUCTUATING */
+        if (level <= 15)      exp = (L3 * ((L + 1) / 3 + 24)) / 50;
+        else if (level <= 35) exp = (L3 * (L + 14)) / 50;
+        else                  exp = (L3 * (L / 2 + 32)) / 50;
+        break;
+    case 3: /* MEDIUM_SLOW */
+        exp = (6 * L3) / 5 - 15 * L * L + 100 * L - 140;
+        if (exp < 0) exp = 0;
+        break;
+    case 4: /* FAST */
+        exp = (4 * L3) / 5;
+        break;
+    case 5: /* SLOW */
+        exp = (5 * L3) / 4;
+        break;
+    }
+    if (exp < 0) exp = 0;
+    if (exp > 0xFFFFFFFFL) exp = 0xFFFFFFFFL;
+    return (uint32_t)exp;
+}
+
+uint8_t pb_growth_rate_for(uint16_t species) {
+    if (species >= 1 && species <= 386) return pb_growth_rates_gen3[species];
+    return 0;
+}
+
+uint32_t pb_exp_for_level(uint16_t species, int level) {
+    return pb_exp_for_level_by_growth(level, pb_growth_rate_for(species));
+}
+
+/* Given a species and an EXP total, compute the level (1..100). Linear
+ * search is fine at this scale (100 iterations max). */
+int pb_level_for_exp(uint16_t species, uint32_t exp) {
+    for (int L = 100; L >= 1; L--) {
+        if (pb_exp_for_level(species, L) <= exp) return L;
+    }
+    return 1;
+}
+
+#include "learnsets_gen3.h"
+
+bool pb_species_can_learn_move(uint16_t species, uint16_t move_id) {
+    if (species < 1 || species > 386 || move_id == 0 || move_id > 354) return false;
+    /* Flat bitmap layout: one bit per (species, move) pair. See
+     * tools/gen_learnsets_gen3.py -- this replaces the earlier
+     * 383-arrays-plus-pointer-table layout that broke .dol boot. */
+    unsigned base = (unsigned)species * PB_LEARNSET_BYTES_PER_SPECIES;
+    return (pb_learnset_gen3_bits[base + (move_id >> 3)] >> (move_id & 7)) & 1;
+}
+
 #include "item_names_gen3.h"
 
 const char *pb_item_name(uint16_t item_id) {

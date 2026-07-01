@@ -117,6 +117,10 @@ void pb_ck3_create_default(uint8_t raw_out[312], uint16_t species_natdex,
  * both the "display" copy at 0x2E and the "data" copy at 0x44. */
 void pb_ck3_set_nickname(uint8_t *raw312, const char *ascii);
 
+/* Set the level + EXP on a CK3 record. Level byte at 0x60, EXP u32
+ * BE at 0x5C. Caller should compute EXP via pb_exp_for_level. */
+void pb_ck3_set_level_exp(uint8_t *raw312, uint8_t level, uint32_t exp);
+
 /* After in-memory edits, recompute checksums and re-encrypt the slot. */
 void pb_colo_finalize_slot(pb_colo_save_t *cs);
 

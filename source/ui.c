@@ -120,8 +120,12 @@ static int list_saves(char paths[][256], int max) {
     struct dirent *e;
     while ((e = readdir(d)) && n < max) {
         size_t L = strlen(e->d_name);
+        /* Gen 3 GBA (.sav/.sa1), Pokemon XD/Colosseum (.gci from GCMM,
+         * .gcs from other tools). Accept all four extensions. */
         if (L > 4 && (strcasecmp(e->d_name + L - 4, ".sav") == 0
-                  ||  strcasecmp(e->d_name + L - 4, ".sa1") == 0)) {
+                  ||  strcasecmp(e->d_name + L - 4, ".sa1") == 0
+                  ||  strcasecmp(e->d_name + L - 4, ".gci") == 0
+                  ||  strcasecmp(e->d_name + L - 4, ".gcs") == 0)) {
             snprintf(paths[n], 256, "sd:/pokebridge/saves/%s", e->d_name);
             n++;
         }
@@ -1175,41 +1179,90 @@ static void gfx_edit_stat_screen(pb_pkm_t *p, const char *title, int max_val,
     }
 }
 
-static int gfx_pick_move(int current) {
-    int sel = current > 354 ? 0 : current;
+/* Move picker with per-species legality filter.
+ *
+ * Builds a flat list of moves the species can legally learn (level-up
+ * + TM/HM, from pret/pokeemerald). X toggles between "legal moves
+ * only" and "show all 354" -- because sometimes you want to teach a
+ * mon a move it can't normally learn, and we shouldn't fully lock
+ * that out. Default is filtered. */
+static int gfx_pick_move(int current, uint16_t species) {
+    static int filtered_ids[355];
+    static int n_filtered = 0;
+    static uint16_t cached_sp = 0;
+    /* Rebuild the filter each time the species changes. */
+    if (n_filtered == 0 || cached_sp != species) {
+        n_filtered = 0;
+        for (int m = 1; m <= 354; m++) {
+            if (pb_species_can_learn_move(species, (uint16_t)m)) {
+                filtered_ids[n_filtered++] = m;
+            }
+        }
+        cached_sp = species;
+    }
+
+    bool show_all = (n_filtered == 0); /* auto-fallback if no data */
+    int sel = 0;
+    /* Position selector at current move if it's in-scope. */
+    if (show_all) {
+        sel = (current > 0 && current <= 354) ? current - 1 : 0;
+    } else {
+        for (int i = 0; i < n_filtered; i++) {
+            if (filtered_ids[i] == current) { sel = i; break; }
+        }
+    }
+
     const int per_page = 14;
     for (;;) {
+        int n = show_all ? 354 : n_filtered;
+        if (sel >= n) sel = 0;
         int page = sel / per_page;
         int start = page * per_page;
+
         pb_gfx_clear();
-        gfx_draw_title_bar("Pick a move");
-        gfx_draw_panel(60, 70, 520, 360, "MOVES");
-        char buf[80];
-        snprintf(buf, sizeof buf, "Page %d / %d   (currently: #%u %s)",
-                 page + 1, (355 + per_page - 1) / per_page,
+        char title[64];
+        snprintf(title, sizeof title, "Pick a move -- %s", pb_species_name(species));
+        gfx_draw_title_bar(title);
+        gfx_draw_panel(60, 70, 520, 360, show_all ? "ALL MOVES" : "LEGAL MOVES");
+        char buf[96];
+        snprintf(buf, sizeof buf,
+                 "Page %d / %d   (currently: #%u %s)",
+                 page + 1, (n + per_page - 1) / per_page,
                  (unsigned)current, pb_move_name((uint16_t)current));
         pb_gfx_text(80, 100, PB_GFX_COLOR_TEXT_DIM, buf);
+
         for (int i = 0; i < per_page; i++) {
             int idx = start + i;
-            if (idx > 354) break;
+            if (idx >= n) break;
+            int move_id = show_all ? (idx + 1) : filtered_ids[idx];
             int yy = 130 + i * 20;
             uint32_t col = (idx == sel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
             if (idx == sel) {
                 pb_gfx_rounded_panel(75, yy - 4, 490, 18, 4, PB_GFX_COLOR_PANEL_LIGHT, 200);
             }
-            snprintf(buf, sizeof buf, "#%3d   %s", idx, pb_move_name((uint16_t)idx));
+            snprintf(buf, sizeof buf, "#%3d   %s", move_id, pb_move_name((uint16_t)move_id));
             pb_gfx_text(90, yy, col, buf);
         }
-        gfx_draw_hint_bar("DPad: select   L/R: page   A: pick   Y: clear   B: cancel");
+
+        gfx_draw_hint_bar(show_all
+            ? "DPad: select  L/R: page  A: pick  X: legal only  Y: clear  B: cancel"
+            : "DPad: select  L/R: page  A: pick  X: show all  Y: clear  B: cancel");
         pb_gfx_flip();
         uint16_t bt = pb_gfx_wait_button();
         if (bt & PAD_BUTTON_B) return -1;
         if (bt & PAD_BUTTON_Y) return 0;
-        if (bt & PAD_BUTTON_A) return sel;
-        if (bt & PAD_BUTTON_UP)   sel = (sel > 0) ? sel - 1 : 354;
-        if (bt & PAD_BUTTON_DOWN) sel = (sel < 354) ? sel + 1 : 0;
+        if (bt & PAD_BUTTON_A) {
+            return show_all ? (sel + 1) : filtered_ids[sel];
+        }
+        if (bt & PAD_BUTTON_X) {
+            show_all = !show_all;
+            /* Fresh state after toggle. */
+            sel = 0;
+        }
+        if (bt & PAD_BUTTON_UP)   sel = (sel > 0) ? sel - 1 : n - 1;
+        if (bt & PAD_BUTTON_DOWN) sel = (sel + 1 < n) ? sel + 1 : 0;
         if (bt & PAD_TRIGGER_L)   sel = (sel >= per_page) ? sel - per_page : 0;
-        if (bt & PAD_TRIGGER_R)   sel = (sel + per_page <= 354) ? sel + per_page : 354;
+        if (bt & PAD_TRIGGER_R)   sel = (sel + per_page < n) ? sel + per_page : n - 1;
     }
 }
 
@@ -1333,9 +1386,73 @@ static void gfx_edit_moves_screen(pb_pkm_t *p) {
         if (bt & PAD_BUTTON_UP)   sel = (sel + 3) % 4;
         if (bt & PAD_BUTTON_DOWN) sel = (sel + 1) % 4;
         if (bt & PAD_BUTTON_A) {
-            int picked = gfx_pick_move(p->a.moves[sel]);
+            int picked = gfx_pick_move(p->a.moves[sel], p->g.species);
             if (picked >= 0) pb_pkm_set_move(p, sel, (uint16_t)picked);
         }
+    }
+}
+
+/* Level editor. Pick 1..100, we compute the right EXP for that level
+ * based on the species's growth rate group and write it back. The
+ * game recomputes displayed level from EXP on next load, so the
+ * result sticks. Returns the picked level, or 0 on cancel. */
+static int gfx_edit_level_screen(pb_pkm_t *p) {
+    int start_level = pb_level_for_exp(p->g.species, p->g.experience);
+    int sel = start_level;
+    for (;;) {
+        pb_gfx_clear();
+        gfx_draw_title_bar("Edit level");
+
+        /* Live preview on left */
+        gfx_draw_panel(28, 70, 200, 290, NULL);
+        pb_gfx_pkm_slot(60, 100, p->g.species, false, pb_pkm_is_shiny(p));
+        pb_gfx_text(60, 180, PB_GFX_COLOR_TEXT_ACCENT, pb_species_name(p->g.species));
+
+        char buf[80];
+        snprintf(buf, sizeof buf, "Current L%d", start_level);
+        pb_gfx_text(60, 210, PB_GFX_COLOR_TEXT_DIM, buf);
+
+        /* Level display + EXP preview on right */
+        gfx_draw_panel(244, 70, 380, 290, "LEVEL");
+
+        snprintf(buf, sizeof buf, "L%3d", sel);
+        pb_gfx_text_scale(300, 110, PB_GFX_COLOR_TEXT_ACCENT, 5, buf);
+
+        uint32_t new_exp = pb_exp_for_level(p->g.species, sel);
+        snprintf(buf, sizeof buf, "EXP: %u", (unsigned)new_exp);
+        pb_gfx_text(260, 220, PB_GFX_COLOR_TEXT, buf);
+        /* Growth rate label -- for the user's sanity so they know
+         * which formula we're using. Table from pokeemerald. */
+        {
+            static const char *const growth_names[6] = {
+                "Medium Fast", "Erratic", "Fluctuating",
+                "Medium Slow", "Fast", "Slow"
+            };
+            uint8_t gr = pb_growth_rate_for(p->g.species);
+            snprintf(buf, sizeof buf, "Growth: %s",
+                     growth_names[gr < 6 ? gr : 0]);
+            pb_gfx_text(260, 240, PB_GFX_COLOR_TEXT_DIM, buf);
+        }
+        pb_gfx_text(260, 268, PB_GFX_COLOR_TEXT_DIM,
+                    "EXP set to level start. Game will");
+        pb_gfx_text(260, 284, PB_GFX_COLOR_TEXT_DIM,
+                    "show this level after saving.");
+
+        gfx_draw_hint_bar("L/R: -/+1   Left/Right: -/+10   A: apply   B: cancel");
+        pb_gfx_flip();
+
+        uint16_t bt = pb_gfx_wait_button();
+        if (bt & PAD_BUTTON_B) return 0;
+        if (bt & PAD_BUTTON_A) {
+            p->g.experience = new_exp;
+            return sel;
+        }
+        if (bt & PAD_TRIGGER_L)    sel = (sel > 1) ? sel - 1 : 100;
+        if (bt & PAD_TRIGGER_R)    sel = (sel < 100) ? sel + 1 : 1;
+        if (bt & PAD_BUTTON_LEFT)  sel = (sel > 10) ? sel - 10 : 1;
+        if (bt & PAD_BUTTON_RIGHT) sel = (sel + 10 <= 100) ? sel + 10 : 100;
+        if (bt & PAD_BUTTON_UP)    sel = (sel < 100) ? sel + 1 : 1;
+        if (bt & PAD_BUTTON_DOWN)  sel = (sel > 1) ? sel - 1 : 100;
     }
 }
 
@@ -1380,7 +1497,7 @@ static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
     if (!p || p->is_empty) return false;
     int sel = 0;
     static const char *fields[] = {
-        "IVs", "EVs", "Moves", "Nature", "Shiny", "Friendship", "Held item", "Nickname"
+        "Level", "IVs", "EVs", "Moves", "Nature", "Shiny", "Friendship", "Held item", "Nickname"
     };
     const int n = (int)(sizeof fields / sizeof fields[0]);
     for (;;) {
@@ -1418,36 +1535,43 @@ static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
             char val[64];
             switch (i) {
                 case 0: {
+                    /* Level -- derived from stored EXP via species growth rate. */
+                    int lvl = pb_level_for_exp(p->g.species, p->g.experience);
+                    snprintf(val, sizeof val, "%d  (%u EXP)",
+                             lvl, (unsigned)p->g.experience);
+                    break;
+                }
+                case 1: {
                     uint8_t ivs[6]; pb_pkm_ivs(p, ivs);
                     snprintf(val, sizeof val, "%2u/%2u/%2u/%2u/%2u/%2u",
                              ivs[0], ivs[1], ivs[2], ivs[3], ivs[4], ivs[5]);
                     break;
                 }
-                case 1:
+                case 2:
                     snprintf(val, sizeof val, "%3u/%3u/%3u/%3u/%3u/%3u",
                              p->e.ev[0], p->e.ev[1], p->e.ev[2],
                              p->e.ev[3], p->e.ev[4], p->e.ev[5]);
                     break;
-                case 2:
+                case 3:
                     snprintf(val, sizeof val, "%s, %s, ...",
                              pb_move_name(p->a.moves[0]), pb_move_name(p->a.moves[1]));
                     break;
-                case 3:
+                case 4:
                     snprintf(val, sizeof val, "%s", pb_nature_name(pb_pkm_get_nature(p)));
                     break;
-                case 4:
+                case 5:
                     snprintf(val, sizeof val, "%s", pb_pkm_is_shiny(p) ? "YES" : "no");
                     break;
-                case 5:
+                case 6:
                     snprintf(val, sizeof val, "%u", p->g.friendship);
                     break;
-                case 6:
+                case 7:
                     snprintf(val, sizeof val, "%s",
                              p->g.held_item == 0
                                ? "(none)"
                                : pb_item_name(p->g.held_item));
                     break;
-                case 7: {
+                case 8: {
                     /* Nickname display. For PK3 the bytes are Gen 3
                      * charset; for XK3/CK3 they were already decoded
                      * to ASCII by pb_xk3_to_pkm / pb_ck3_to_pkm. */
@@ -1476,18 +1600,35 @@ static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
 
         if (bt & PAD_BUTTON_A) {
             switch (sel) {
-                case 0: gfx_edit_stat_screen(p, "Edit IVs", 31, pb_pkm_get_iv, pb_pkm_set_iv); break;
-                case 1: gfx_edit_evs_screen(p); break;
-                case 2: gfx_edit_moves_screen(p); break;
-                case 3: gfx_pick_nature(p); break;
-                case 4: pb_pkm_toggle_shiny(p, !pb_pkm_is_shiny(p)); break;
-                case 5: p->g.friendship = 255; break;
-                case 6: {
+                case 0: {
+                    /* Level editor -- picks a level, writes new EXP
+                     * using species's growth rate. For XK3/CK3 also
+                     * update the raw stored level byte since the game
+                     * caches it separately from EXP. */
+                    int new_lvl = gfx_edit_level_screen(p);
+                    if (new_lvl > 0 && raw) {
+                        if (fmt == PB_FMT_XK3) {
+                            pb_xk3_set_level_exp(raw, (uint8_t)new_lvl, p->g.experience);
+                        } else if (fmt == PB_FMT_CK3) {
+                            pb_ck3_set_level_exp(raw, (uint8_t)new_lvl, p->g.experience);
+                        }
+                        /* For PB_FMT_PK3, pb_pkm_encode picks up
+                         * p->g.experience directly on save-back. */
+                    }
+                    break;
+                }
+                case 1: gfx_edit_stat_screen(p, "Edit IVs", 31, pb_pkm_get_iv, pb_pkm_set_iv); break;
+                case 2: gfx_edit_evs_screen(p); break;
+                case 3: gfx_edit_moves_screen(p); break;
+                case 4: gfx_pick_nature(p); break;
+                case 5: pb_pkm_toggle_shiny(p, !pb_pkm_is_shiny(p)); break;
+                case 6: p->g.friendship = 255; break;
+                case 7: {
                     int picked = gfx_pick_item(p->g.held_item, fmt);
                     if (picked >= 0) p->g.held_item = (uint16_t)picked;
                     break;
                 }
-                case 7: {
+                case 8: {
                     /* Nickname editor: open the on-screen keyboard pre-
                      * filled with the current nickname, write the result
                      * back to whichever offset matches the save format. */
@@ -1519,13 +1660,14 @@ static bool gfx_edit_pkm(pb_pkm_t *p, uint8_t *raw, pb_fmt_t fmt) {
                 }
             }
         }
-        /* L/R quick-adjust on friendship + item */
-        if (sel == 5) {
+        /* L/R quick-adjust on friendship + item (indices shifted +1
+         * since "Level" was inserted at index 0). */
+        if (sel == 6) {
             uint8_t f = p->g.friendship;
             if (bt & PAD_TRIGGER_L) p->g.friendship = f > 0 ? f - 1 : 0;
             if (bt & PAD_TRIGGER_R) p->g.friendship = f < 255 ? f + 1 : 255;
         }
-        if (sel == 6) {
+        if (sel == 7) {
             uint16_t it = p->g.held_item;
             if (bt & PAD_TRIGGER_L) p->g.held_item = it > 0 ? it - 1 : 0;
             if (bt & PAD_TRIGGER_R) p->g.held_item = it + 1;
@@ -2432,16 +2574,11 @@ void pb_ui_run_graphics_app(void) {
     bool audio_armed = false;
     int sel = 0;
     static const char *items[] = {
-        "Load FireRed save (demo)",
-        "Load Emerald save (demo)",
-        "Load Pokemon XD save (demo)",
-        "Load Pokemon Colosseum save (demo)",
         "Read GBA cart via link cable",
         "Open save from SD card",
         "Scan GameCube memory card",
         "Game art gallery",
-        "About PokeBridge",
-        "Exit",
+        "Exit to Swiss",
     };
     const int n = (int)(sizeof items / sizeof items[0]);
 
@@ -2470,16 +2607,11 @@ void pb_ui_run_graphics_app(void) {
 
         /* Box art preview (right) for the highlighted item. */
         static const pb_boxart_t art_for[] = {
-            PB_BOXART_FIRERED,    /* 0: FireRed demo         */
-            PB_BOXART_EMERALD,    /* 1: Emerald demo         */
-            PB_BOXART_XD,         /* 2: XD demo              */
-            PB_BOXART_COLOSSEUM,  /* 3: Colosseum demo       */
-            PB_BOXART_SAPPHIRE,   /* 4: GBA link cable       */
-            PB_BOXART_RUBY,       /* 5: Open from SD         */
-            PB_BOXART_BOX,        /* 6: Scan memcard         */
-            PB_BOXART_LEAFGREEN,  /* 7: Game art gallery     */
-            PB_BOXART_BOX,        /* 8: About                */
-            PB_BOXART_UNKNOWN,    /* 9: Exit                 */
+            PB_BOXART_SAPPHIRE,   /* 0: GBA link cable       */
+            PB_BOXART_RUBY,       /* 1: Open from SD         */
+            PB_BOXART_BOX,        /* 2: Scan memcard         */
+            PB_BOXART_LEAFGREEN,  /* 3: Game art gallery     */
+            PB_BOXART_UNKNOWN,    /* 4: Exit to Swiss        */
         };
         if (sel >= 0 && sel < (int)(sizeof art_for / sizeof art_for[0]) &&
             art_for[sel] != PB_BOXART_UNKNOWN) {
@@ -2504,7 +2636,22 @@ void pb_ui_run_graphics_app(void) {
         if (b & (PAD_BUTTON_DOWN | PAD_TRIGGER_R)) sel = (sel + 1) % n;
         if (b & PAD_BUTTON_A) {
             int picked = sel;
-            switch (sel) {
+            /* Map the new (5-item) menu index to the original case
+             * numbers used by the switch below. This keeps all the
+             * existing case bodies untouched -- demo cases 0-3 and
+             * About (case 8) are unreachable now but the code is
+             * left in place because demos are still loadable from
+             * inside "Open save from SD card" (case 5). */
+            static const int sel_to_case[] = {
+                4,  /* GBA link cable         */
+                5,  /* Open save from SD card */
+                6,  /* Scan memcard           */
+                7,  /* Game art gallery       */
+                9,  /* Exit to Swiss          */
+            };
+            int case_id = (sel >= 0 && sel < (int)(sizeof sel_to_case / sizeof sel_to_case[0]))
+                          ? sel_to_case[sel] : sel;
+            switch (case_id) {
                 case 0: {
                     static pb_save_t s;
                     if (!pb_save_load(&s, pb_embedded_firered_sav, pb_embedded_firered_sav_len)) break;
@@ -3004,13 +3151,31 @@ void pb_ui_run_graphics_app(void) {
                     break;
                 }
                 case 5: {
-                    /* SD save picker */
-                    char paths[16][256];
+                    /* SD save picker. Also lists the embedded demo saves
+                     * at the top of the list so the main menu can stay
+                     * cluttered-free. Demo paths use the special prefix
+                     * "demo:" which the load dispatch below recognizes. */
+                    char paths[20][256];
                     int found = 0;
-                    if (pb_sd_try_mount()) {
-                        found = list_saves(paths, 16);
+                    /* Prepend demo entries. Only include ones whose
+                     * embedded data is non-empty (setup_assets.sh may
+                     * have written stubs). */
+                    if (pb_embedded_firered_sav_len > 1) {
+                        snprintf(paths[found++], 256, "demo:firered");
                     }
-                    if (!pb_sd_try_mount() || found == 0) {
+                    if (pb_embedded_emerald_sav_len > 1) {
+                        snprintf(paths[found++], 256, "demo:emerald");
+                    }
+                    if (pb_embedded_xd_sav_len > 1) {
+                        snprintf(paths[found++], 256, "demo:xd");
+                    }
+                    if (pb_embedded_colo_sav_len > 1) {
+                        snprintf(paths[found++], 256, "demo:colo");
+                    }
+                    if (pb_sd_try_mount()) {
+                        found += list_saves(paths + found, 20 - found);
+                    }
+                    if (found == 0) {
                         for (;;) {
                             pb_gfx_clear();
                             gfx_draw_title_bar("SD card");
@@ -3020,11 +3185,12 @@ void pb_ui_run_graphics_app(void) {
                                 pb_gfx_text(90, 174, PB_GFX_COLOR_TEXT_DIM, "Dolphin: no GameCube SD emulation in this build.");
                                 pb_gfx_text(90, 192, PB_GFX_COLOR_TEXT_DIM, "Real hardware: insert an SD card and reboot via Swiss.");
                             } else {
-                                pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT, "No .sav files found.");
-                                pb_gfx_text(90, 174, PB_GFX_COLOR_TEXT_DIM, "Put saves at:");
+                                pb_gfx_text(90, 150, PB_GFX_COLOR_PANEL_ACCENT, "No supported saves found.");
+                                pb_gfx_text(90, 174, PB_GFX_COLOR_TEXT_DIM, "Put .sav / .sa1 / .gci / .gcs at:");
                                 pb_gfx_text(90, 192, PB_GFX_COLOR_TEXT, "sd:/pokebridge/saves/");
                                 pb_gfx_text(90, 220, PB_GFX_COLOR_TEXT_DIM, "PokeBridge will also scan:");
                                 pb_gfx_text(90, 238, PB_GFX_COLOR_TEXT, "sd:/saves/  and  sd:/  (root)");
+                                pb_gfx_text(90, 258, PB_GFX_COLOR_TEXT_DIM, "Colo/XD: extract via GCMM -> .gci");
                             }
                             pb_gfx_text(90, 280, PB_GFX_COLOR_TEXT_ACCENT, "Exported .pk3 files land at:");
                             pb_gfx_text(90, 298, PB_GFX_COLOR_TEXT, "sd:/pokebridge/export/");
@@ -3037,26 +3203,47 @@ void pb_ui_run_graphics_app(void) {
                         }
                         break;
                     }
-                    /* List + pick. We peek each file's content/size to detect
-                     * its game and show the matching box art. */
+                    /* List + pick. Peek each file's content/size to detect
+                     * game and show matching box art. Demo entries have
+                     * boxart baked in. */
                     int psel = 0;
-                    static pb_boxart_t arts[16];
+                    static pb_boxart_t arts[20];
                     for (int i = 0; i < found; i++) {
-                        arts[i] = detect_boxart_by_file(paths[i]);
+                        if (strncmp(paths[i], "demo:", 5) == 0) {
+                            const char *d = paths[i] + 5;
+                            if      (strcmp(d, "firered") == 0)  arts[i] = PB_BOXART_FIRERED;
+                            else if (strcmp(d, "emerald") == 0)  arts[i] = PB_BOXART_EMERALD;
+                            else if (strcmp(d, "xd") == 0)       arts[i] = PB_BOXART_XD;
+                            else if (strcmp(d, "colo") == 0)     arts[i] = PB_BOXART_COLOSSEUM;
+                            else                                 arts[i] = PB_BOXART_UNKNOWN;
+                        } else {
+                            arts[i] = detect_boxart_by_file(paths[i]);
+                        }
                     }
                     for (;;) {
                         pb_gfx_clear();
                         gfx_draw_title_bar("Pick a save");
-                        gfx_draw_panel(28, 70, 340, 370, "SD CARD SAVES");
+                        gfx_draw_panel(28, 70, 340, 370, "SAVES");
                         for (int i = 0; i < found; i++) {
                             int yy = 100 + i * 22;
                             uint32_t col = (i == psel) ? PB_GFX_COLOR_TEXT_ACCENT : PB_GFX_COLOR_TEXT;
                             if (i == psel) {
                                 pb_gfx_rounded_panel(43, yy - 4, 310, 20, 4, PB_GFX_COLOR_PANEL_LIGHT, 180);
                             }
-                            const char *base = paths[i];
-                            const char *p = strrchr(paths[i], '/');
-                            if (p) base = p + 1;
+                            const char *base;
+                            /* Friendlier display for demo entries. */
+                            if (strncmp(paths[i], "demo:", 5) == 0) {
+                                const char *d = paths[i] + 5;
+                                if      (strcmp(d, "firered") == 0)  base = "* FireRed (demo)";
+                                else if (strcmp(d, "emerald") == 0)  base = "* Emerald (demo)";
+                                else if (strcmp(d, "xd") == 0)       base = "* Pokemon XD (demo)";
+                                else if (strcmp(d, "colo") == 0)     base = "* Pokemon Colosseum (demo)";
+                                else                                 base = "* (demo)";
+                            } else {
+                                base = paths[i];
+                                const char *p = strrchr(paths[i], '/');
+                                if (p) base = p + 1;
+                            }
                             pb_gfx_text(55, yy, col, base);
                         }
                         /* Box art preview for the highlighted save */
@@ -3068,13 +3255,42 @@ void pb_ui_run_graphics_app(void) {
                         if (bb & PAD_BUTTON_UP)   psel = (psel + found - 1) % found;
                         if (bb & PAD_BUTTON_DOWN) psel = (psel + 1) % found;
                         if (bb & PAD_BUTTON_A) {
-                            /* Size-detect: 128KB = Gen 3 .sav, 352KB+wrapper = XD */
+                            /* Demo entries dispatch to the embedded data
+                             * directly; regular files go through fopen. */
+                            if (strncmp(paths[psel], "demo:", 5) == 0) {
+                                const char *d = paths[psel] + 5;
+                                if (strcmp(d, "firered") == 0) {
+                                    static pb_save_t s;
+                                    if (pb_save_load(&s, pb_embedded_firered_sav,
+                                                     pb_embedded_firered_sav_len))
+                                        gfx_pkm_party_screen(&s);
+                                } else if (strcmp(d, "emerald") == 0) {
+                                    static pb_save_t s;
+                                    if (pb_save_load(&s, pb_embedded_emerald_sav,
+                                                     pb_embedded_emerald_sav_len))
+                                        gfx_pkm_party_screen(&s);
+                                } else if (strcmp(d, "xd") == 0) {
+                                    static pb_xd_save_t xs;
+                                    if (pb_xd_load(&xs, pb_embedded_xd_sav,
+                                                   pb_embedded_xd_sav_len))
+                                        gfx_xd_party_screen(&xs);
+                                } else if (strcmp(d, "colo") == 0) {
+                                    static pb_colo_save_t cs;
+                                    if (pb_colo_load(&cs, pb_embedded_colo_sav,
+                                                     pb_embedded_colo_sav_len))
+                                        gfx_colo_party_screen(&cs);
+                                }
+                                continue;
+                            }
+                            /* Real file: size-detect and dispatch.
+                             * 128KB = Gen 3 GBA, 352KB (+wrapper) = XD,
+                             * 384KB (+wrapper) = Colosseum. */
                             FILE *f = fopen(paths[psel], "rb");
                             if (!f) continue;
                             fseek(f, 0, SEEK_END);
                             long sz = ftell(f);
                             fseek(f, 0, SEEK_SET);
-                            static uint8_t fbuf[PB_XD_SAVE_SIZE + PB_XD_WRAPPER_SIZE];
+                            static uint8_t fbuf[PB_COLO_SAVE_SIZE + 512];
                             size_t maxr = (size_t)sz < sizeof fbuf ? (size_t)sz : sizeof fbuf;
                             size_t nr = fread(fbuf, 1, maxr, f);
                             fclose(f);
@@ -3085,6 +3301,14 @@ void pb_ui_run_graphics_app(void) {
                                        sz == PB_XD_SAVE_SIZE) {
                                 static pb_xd_save_t xs;
                                 if (pb_xd_load(&xs, fbuf, nr)) gfx_xd_party_screen(&xs);
+                            } else if ((unsigned long)sz >= PB_COLO_SAVE_SIZE &&
+                                       (unsigned long)sz <= PB_COLO_SAVE_SIZE + 512) {
+                                /* Colosseum: raw = 0x60000, .gci = +0x40 GCI
+                                 * header, .gcs = +336 GCSAVE wrapper.
+                                 * pb_colo_load takes the last 0x60000 bytes
+                                 * so it auto-strips any leading wrapper. */
+                                static pb_colo_save_t cs;
+                                if (pb_colo_load(&cs, fbuf, nr)) gfx_colo_party_screen(&cs);
                             }
                             /* else: unknown format; silently return to list */
                         }
